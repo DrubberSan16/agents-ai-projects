@@ -1,0 +1,21 @@
+{
+  "name": "agents-ai-projects",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently \"npm run start:dev -w apps/api\" \"npm run dev -w apps/web\"",
+    "dev:api": "npm run start:dev -w apps/api",
+    "dev:web": "npm run dev -w apps/web",
+    "build": "npm run build -w apps/api && npm run build -w apps/web",
+    "prisma:generate": "npx prisma generate --schema apps/api/prisma/schema.prisma",
+    "prisma:migrate": "npx prisma migrate dev --schema apps/api/prisma/schema.prisma",
+    "prisma:studio": "npx prisma studio --schema apps/api/prisma/schema.prisma"
+  },
+  "devDependencies": {
+    "concurrently": "latest"
+  }
+}

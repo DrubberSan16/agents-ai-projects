@@ -1,1 +1,9 @@
 node_modules
+dist
+.env
+apps/api/.env
+apps/api/storage
+apps/api/dist
+apps/web/dist
+*.db
+*.sqlite

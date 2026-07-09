@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import {
   Bell,
   Check,
@@ -31,6 +31,7 @@ interface AgentState {
   key: AgentKey
   status: AgentStatus
   summary: string
+  lastRunId?: string
   updatedAt: string
 }
 
@@ -120,6 +121,9 @@ const defaultTextByAgent: Record<AgentKey, string> = {
   deployment: '',
 }
 
+type ProjectAgentOutput = Partial<Record<AgentKey, string>>
+type ProjectAgentLogs = Partial<Record<AgentKey, string[]>>
+
 const agentLogSteps: Record<AgentKey, (projectName: string) => string[]> = {
   analysis: (projectName) => [
     `Analizando archivos del proyecto ${projectName}.`,
@@ -158,18 +162,17 @@ const agentLogSteps: Record<AgentKey, (projectName: string) => string[]> = {
 const projects = ref<ProjectSnapshot[]>([])
 const selectedProjectId = ref('')
 const activeAgent = ref<AgentKey>('analysis')
-const runningAgent = ref<AgentKey | null>(null)
+const runningRun = ref<{ projectId: string; agentKey: AgentKey } | null>(null)
+const bootingApp = ref(true)
 const loadingProjects = ref(false)
 const creatingProject = ref(false)
 const errorMessage = ref('')
-const outputByAgent = reactive<Record<AgentKey, string>>({ ...defaultTextByAgent })
+const outputByProjectAgent = reactive<Record<string, ProjectAgentOutput>>({})
 const promptByAgent = reactive<Record<AgentKey, string>>({ ...defaultTextByAgent })
-const liveLogs = reactive<Record<AgentKey, string[]>>({
-  analysis: [],
-  developer: [],
-  tester: [],
-  deployment: [],
+const analysisOptions = reactive({
+  deepAnalysis: false,
 })
+const liveLogsByProjectAgent = reactive<Record<string, ProjectAgentLogs>>({})
 const pendingDocuments = ref<Array<{ name: string; content: string }>>([])
 let liveLogTimer: number | undefined
 
@@ -209,18 +212,49 @@ const selectedProject = computed(() =>
 
 const activeAgentMeta = computed(() => agents.find((agent) => agent.key === activeAgent.value))
 
-const canRunAgent = computed(() => Boolean(selectedProject.value && !runningAgent.value))
+const canRunAgent = computed(() => Boolean(selectedProject.value && !runningRun.value))
 
-const currentOutput = computed(() => outputByAgent[activeAgent.value])
+const currentOutput = computed(() => {
+  const projectId = selectedProjectId.value
+  return projectId ? outputByProjectAgent[projectId]?.[activeAgent.value] ?? '' : ''
+})
 
-const activeLogs = computed(() => liveLogs[activeAgent.value])
+const activeLogs = computed(() => {
+  const projectId = selectedProjectId.value
+  return projectId ? liveLogsByProjectAgent[projectId]?.[activeAgent.value] ?? [] : []
+})
+
+const isActiveAgentRunning = computed(() => {
+  const running = runningRun.value
+  return Boolean(
+    running &&
+      running.projectId === selectedProjectId.value &&
+      running.agentKey === activeAgent.value,
+  )
+})
+
+const canDownloadReport = computed(() => {
+  const project = selectedProject.value
+  if (!project) {
+    return false
+  }
+  const state = agentState(activeAgent.value)
+  const finishedStatus = state.status !== 'Inicializado' && state.status !== 'Procesando'
+  return Boolean(
+    currentOutput.value.trim() ||
+      (state.lastRunId && finishedStatus) ||
+      (activeAgent.value === 'tester' && project.hasTestingReport),
+  )
+})
 
 const outputText = computed(() => {
-  if (runningAgent.value === activeAgent.value && !currentOutput.value) {
+  if (isActiveAgentRunning.value && !currentOutput.value) {
     return 'Pensando...'
   }
   return currentOutput.value || agentState(activeAgent.value).summary || 'Sin ejecuciones todavia.'
 })
+
+const renderedOutput = computed(() => renderMarkdown(outputText.value))
 
 const pathLabel = computed(() =>
   createForm.mode === 'new' ? 'Carpeta base' : 'Carpeta del proyecto',
@@ -228,6 +262,10 @@ const pathLabel = computed(() =>
 
 onMounted(() => {
   void loadProjects()
+})
+
+watch(selectedProjectId, () => {
+  errorMessage.value = ''
 })
 
 async function loadProjects(preferredProjectId?: string) {
@@ -244,6 +282,11 @@ async function loadProjects(preferredProjectId?: string) {
     errorMessage.value = getErrorMessage(error)
   } finally {
     loadingProjects.value = false
+    if (bootingApp.value) {
+      window.setTimeout(() => {
+        bootingApp.value = false
+      }, 450)
+    }
   }
 }
 
@@ -289,37 +332,49 @@ async function createProject() {
 }
 
 async function runCurrentAgent() {
-  if (!selectedProject.value || runningAgent.value) {
+  const project = selectedProject.value
+  if (!project || runningRun.value) {
     return
   }
   const agentKey = activeAgent.value
-  runningAgent.value = agentKey
-  outputByAgent[agentKey] = ''
+  const projectId = project.id
+  runningRun.value = { projectId, agentKey }
+  setProjectOutput(projectId, agentKey, '')
   errorMessage.value = ''
-  startLiveLogs(agentKey)
+  startLiveLogs(projectId, agentKey, project.name)
   try {
+    const payload = {
+      prompt: promptByAgent[agentKey],
+      documents: agentKey === 'analysis' ? pendingDocuments.value : [],
+      deepAnalysis: agentKey === 'analysis' ? analysisOptions.deepAnalysis : undefined,
+    }
     const result = await api<RunAgentResult>(
-      `/projects/${selectedProject.value.id}/agents/${agentKey}/run`,
+      `/projects/${projectId}/agents/${agentKey}/run`,
       {
         method: 'POST',
-        body: JSON.stringify({
-          prompt: promptByAgent[agentKey],
-          documents: agentKey === 'analysis' ? pendingDocuments.value : [],
-        }),
+        body: JSON.stringify(payload),
       },
     )
     upsertProject(result.project)
-    outputByAgent[agentKey] = result.output
-    appendLiveLog(agentKey, 'Finalizado. Resultado guardado en la memoria del proyecto.')
+    setProjectOutput(result.project.id, agentKey, result.output)
+    appendLiveLog(
+      result.project.id,
+      agentKey,
+      'Finalizado. Resultado guardado en la memoria del proyecto.',
+    )
     if (agentKey === 'analysis') {
       pendingDocuments.value = []
     }
   } catch (error) {
-    appendLiveLog(agentKey, 'Se detuvo la ejecucion. Revisa la notificacion o el error mostrado.')
+    appendLiveLog(
+      projectId,
+      agentKey,
+      'Se detuvo la ejecucion. Revisa la notificacion o el error mostrado.',
+    )
     errorMessage.value = getErrorMessage(error)
   } finally {
     clearLiveLogTimer()
-    runningAgent.value = null
+    runningRun.value = null
   }
 }
 
@@ -329,11 +384,56 @@ async function handleDocumentUpload(event: Event) {
   const documents = await Promise.all(
     files.map(async (file) => ({
       name: file.name,
-      content: await file.text(),
+      content: isTextLikeFile(file) ? await file.text() : unsupportedDocumentContent(file),
     })),
   )
   pendingDocuments.value = [...pendingDocuments.value, ...documents]
   input.value = ''
+}
+
+function isTextLikeFile(file: File) {
+  const extension = file.name.split('.').pop()?.toLowerCase() ?? ''
+  const textExtensions = new Set([
+    'txt',
+    'md',
+    'markdown',
+    'csv',
+    'tsv',
+    'json',
+    'xml',
+    'yaml',
+    'yml',
+    'html',
+    'css',
+    'scss',
+    'js',
+    'jsx',
+    'ts',
+    'tsx',
+    'vue',
+    'java',
+    'kt',
+    'py',
+    'go',
+    'cs',
+    'php',
+    'rb',
+    'sql',
+    'prisma',
+  ])
+
+  return (
+    file.type.startsWith('text/') ||
+    file.type === 'application/json' ||
+    file.type === 'application/xml' ||
+    textExtensions.has(extension)
+  )
+}
+
+function unsupportedDocumentContent(file: File) {
+  const extension = file.name.split('.').pop()?.toUpperCase() || 'binario'
+  return `[Documento ${extension} omitido]
+El archivo se cargo como referencia, pero no se envio su contenido binario al analisis. Exporta el contenido a TXT/MD o copia el texto en el prompt para que el agente lo interprete.`
 }
 
 async function resolveNotification(notificationId: string) {
@@ -378,35 +478,53 @@ function selectCurrentDirectory() {
   directoryPicker.open = false
 }
 
+function setProjectOutput(projectId: string, agentKey: AgentKey, output: string) {
+  outputByProjectAgent[projectId] = {
+    ...(outputByProjectAgent[projectId] ?? {}),
+    [agentKey]: output,
+  }
+}
+
+function setProjectLogs(projectId: string, agentKey: AgentKey, logs: string[]) {
+  liveLogsByProjectAgent[projectId] = {
+    ...(liveLogsByProjectAgent[projectId] ?? {}),
+    [agentKey]: logs,
+  }
+}
+
 function downloadReport() {
   if (!selectedProject.value) {
     return
   }
   window.open(
-    `${API_BASE}/projects/${selectedProject.value.id}/testing-report/download`,
+    `${API_BASE}/projects/${selectedProject.value.id}/agents/${activeAgent.value}/report/download`,
     '_blank',
     'noopener,noreferrer',
   )
 }
 
-function startLiveLogs(agentKey: AgentKey) {
+function startLiveLogs(projectId: string, agentKey: AgentKey, projectName: string) {
   clearLiveLogTimer()
-  const steps = agentLogSteps[agentKey](selectedProject.value?.name ?? 'proyecto')
-  liveLogs[agentKey] = []
-  appendLiveLog(agentKey, steps[0])
+  const steps = agentLogSteps[agentKey](projectName)
+  if (agentKey === 'analysis' && analysisOptions.deepAnalysis) {
+    steps.splice(1, 0, 'Ejecutando analisis profundo sobre la estructura completa del proyecto.')
+  }
+  setProjectLogs(projectId, agentKey, [])
+  appendLiveLog(projectId, agentKey, steps[0])
   let index = 1
   liveLogTimer = window.setInterval(() => {
     if (index >= steps.length) {
       clearLiveLogTimer()
       return
     }
-    appendLiveLog(agentKey, steps[index])
+    appendLiveLog(projectId, agentKey, steps[index])
     index += 1
   }, 950)
 }
 
-function appendLiveLog(agentKey: AgentKey, message: string) {
-  liveLogs[agentKey] = [...liveLogs[agentKey], message]
+function appendLiveLog(projectId: string, agentKey: AgentKey, message: string) {
+  const currentLogs = liveLogsByProjectAgent[projectId]?.[agentKey] ?? []
+  setProjectLogs(projectId, agentKey, [...currentLogs, message])
 }
 
 function clearLiveLogTimer() {
@@ -438,7 +556,10 @@ function agentState(agentKey: AgentKey): AgentState {
 }
 
 function displayStatus(agentKey: AgentKey): AgentStatus {
-  return runningAgent.value === agentKey ? 'Procesando' : agentState(agentKey).status
+  const running = runningRun.value
+  return running?.projectId === selectedProjectId.value && running.agentKey === agentKey
+    ? 'Procesando'
+    : agentState(agentKey).status
 }
 
 function statusClass(status: AgentStatus) {
@@ -468,6 +589,116 @@ function getErrorMessage(error: unknown) {
   return 'Ocurrio un error inesperado.'
 }
 
+function renderMarkdown(markdown: string) {
+  const lines = markdown.replace(/\r\n/g, '\n').split('\n')
+  const html: string[] = []
+  let listType: 'ul' | 'ol' | null = null
+  let inCode = false
+  let codeLines: string[] = []
+
+  const closeList = () => {
+    if (listType) {
+      html.push(`</${listType}>`)
+      listType = null
+    }
+  }
+
+  const ensureList = (type: 'ul' | 'ol') => {
+    if (listType === type) {
+      return
+    }
+    closeList()
+    listType = type
+    html.push(`<${type}>`)
+  }
+
+  for (const rawLine of lines) {
+    const line = rawLine.trimEnd()
+    const trimmed = line.trim()
+
+    if (trimmed.startsWith('```')) {
+      if (inCode) {
+        html.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`)
+        codeLines = []
+        inCode = false
+      } else {
+        closeList()
+        inCode = true
+      }
+      continue
+    }
+
+    if (inCode) {
+      codeLines.push(rawLine)
+      continue
+    }
+
+    if (!trimmed) {
+      closeList()
+      continue
+    }
+
+    const heading = trimmed.match(/^(#{1,6})\s+(.+)$/)
+    if (heading) {
+      closeList()
+      const level = Math.min(heading[1].length + 1, 4)
+      html.push(`<h${level}>${renderInline(heading[2])}</h${level}>`)
+      continue
+    }
+
+    const bullet = trimmed.match(/^[-*]\s+(.+)$/)
+    if (bullet) {
+      ensureList('ul')
+      html.push(`<li>${renderInline(bullet[1])}</li>`)
+      continue
+    }
+
+    const numbered = trimmed.match(/^\d+\.\s+(.+)$/)
+    if (numbered) {
+      ensureList('ol')
+      html.push(`<li>${renderInline(numbered[1])}</li>`)
+      continue
+    }
+
+    const quote = trimmed.match(/^>\s+(.+)$/)
+    if (quote) {
+      closeList()
+      html.push(`<blockquote>${renderInline(quote[1])}</blockquote>`)
+      continue
+    }
+
+    closeList()
+    html.push(`<p>${renderInline(trimmed)}</p>`)
+  }
+
+  closeList()
+  if (inCode) {
+    html.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`)
+  }
+  return html.join('')
+}
+
+function renderInline(value: string) {
+  return value
+    .split(/(`[^`]+`)/g)
+    .map((part) => {
+      if (part.startsWith('`') && part.endsWith('`')) {
+        return `<code>${escapeHtml(part.slice(1, -1))}</code>`
+      }
+      return escapeHtml(part).replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    })
+    .join('')
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;')
+}
+
 async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
   const headers = new Headers(init.headers)
   if (init.body && !headers.has('Content-Type')) {
@@ -493,12 +724,28 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 <template>
   <main class="app-shell">
+    <div v-if="bootingApp" class="app-loader" role="status" aria-live="polite">
+      <section class="loader-content" aria-label="Cargando Nexus Agents">
+        <span class="brand-mark loader-mark" aria-hidden="true">
+          <span>NA</span>
+        </span>
+        <p class="eyebrow">Orquestador IA</p>
+        <h1>Nexus Agents</h1>
+        <p class="loader-copy">Cargando</p>
+        <div class="loader-progress" aria-hidden="true">
+          <span></span>
+        </div>
+      </section>
+    </div>
+
     <aside class="sidebar">
       <div class="brand">
-        <Database :size="20" />
+        <span class="brand-mark" aria-hidden="true">
+          <span>NA</span>
+        </span>
         <div>
-          <strong>Agents AI</strong>
-          <span>Orquestador</span>
+          <strong>Nexus Agents</strong>
+          <span>AI Delivery Console</span>
         </div>
       </div>
 
@@ -656,6 +903,11 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
             <textarea v-model="promptByAgent[activeAgent]" rows="7" />
           </label>
 
+          <label v-if="activeAgent === 'analysis'" class="check-option">
+            <input v-model="analysisOptions.deepAnalysis" type="checkbox" />
+            <span>Analisis profundo</span>
+          </label>
+
           <div v-if="activeAgent === 'analysis'" class="document-upload">
             <label class="file-button">
               <Upload :size="17" />
@@ -672,14 +924,14 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
               :disabled="!canRunAgent"
               @click="runCurrentAgent"
             >
-              <Loader2 v-if="runningAgent === activeAgent" class="spin" :size="17" />
+              <Loader2 v-if="isActiveAgentRunning" class="spin" :size="17" />
               <Play v-else :size="17" />
               Ejecutar
             </button>
             <button
               type="button"
               class="secondary-action"
-              :disabled="!selectedProject.hasTestingReport"
+              :disabled="!canDownloadReport"
               @click="downloadReport"
             >
               <Download :size="17" />
@@ -705,14 +957,14 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
               <p class="eyebrow">Salida</p>
               <h2>Resultado del agente</h2>
             </div>
-            <Loader2 v-if="runningAgent === activeAgent" class="spin" :size="18" />
+            <Loader2 v-if="isActiveAgentRunning" class="spin" :size="18" />
             <Send v-else :size="18" />
           </div>
 
           <div v-if="activeLogs.length" class="live-log">
             <div v-for="(log, index) in activeLogs" :key="`${log}-${index}`">
               <Loader2
-                v-if="runningAgent === activeAgent && index === activeLogs.length - 1"
+                v-if="isActiveAgentRunning && index === activeLogs.length - 1"
                 class="spin"
                 :size="14"
               />
@@ -721,7 +973,7 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
             </div>
           </div>
 
-          <pre>{{ outputText }}</pre>
+          <div class="markdown-view" v-html="renderedOutput"></div>
         </article>
       </section>
     </section>

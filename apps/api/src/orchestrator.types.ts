@@ -93,6 +93,7 @@ export interface RunAgentInput {
     name: string;
     content: string;
   }>;
+  deepAnalysis?: boolean;
   targetType?: ProjectTarget;
 }
 

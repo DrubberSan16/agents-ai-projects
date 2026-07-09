@@ -1,10 +1,11 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, ServiceUnavailableException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 interface GenerateOptions {
   system: string;
   prompt: string;
   fallback: () => string;
+  timeoutMs?: number;
 }
 
 @Injectable()
@@ -12,14 +13,17 @@ export class AiOrchestratorService {
   private readonly apiKey: string;
   private readonly model: string;
   private readonly requestTimeoutMs: number;
+  private readonly fallbackOnError: boolean;
 
   constructor(private readonly configService: ConfigService) {
     this.apiKey = this.configService.get<string>('OPENAI_API_KEY')?.trim() ?? '';
     this.model =
       this.configService.get<string>('OPENAI_MODEL')?.trim() || 'gpt-4.1-mini';
     this.requestTimeoutMs = Number(
-      this.configService.get<string>('OPENAI_REQUEST_TIMEOUT_MS') ?? 12000,
+      this.configService.get<string>('OPENAI_REQUEST_TIMEOUT_MS') ?? 180000,
     );
+    this.fallbackOnError =
+      this.configService.get<string>('OPENAI_FALLBACK_ON_ERROR') === 'true';
   }
 
   async generate(options: GenerateOptions): Promise<{
@@ -40,24 +44,37 @@ export class AiOrchestratorService {
       ]);
       const provider = createOpenAI({ apiKey: this.apiKey });
       const abortController = new AbortController();
-      const timeout = setTimeout(
-        () => abortController.abort(),
-        this.requestTimeoutMs,
-      );
+      const timeoutMs = options.timeoutMs ?? this.requestTimeoutMs;
+      const timeout =
+        timeoutMs > 0
+          ? setTimeout(() => abortController.abort(), timeoutMs)
+          : undefined;
       const result = await generateText({
         model: provider.responses(this.model as never),
         system: options.system,
         prompt: options.prompt,
         temperature: 0.2,
         abortSignal: abortController.signal,
-      }).finally(() => clearTimeout(timeout));
+      }).finally(() => {
+        if (timeout) {
+          clearTimeout(timeout);
+        }
+      });
 
       return {
         text: result.text.trim(),
         source: 'openai',
       };
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const rawMessage = error instanceof Error ? error.message : String(error);
+      const timeoutMs = options.timeoutMs ?? this.requestTimeoutMs;
+      const message =
+        rawMessage === 'This operation was aborted'
+          ? `OpenAI no respondio antes de ${timeoutMs} ms. Sube el timeout del agente o reduce el tamano de la solicitud.`
+          : rawMessage;
+      if (!this.fallbackOnError) {
+        throw new ServiceUnavailableException(message);
+      }
       return {
         text: `${options.fallback()}\n\n> Modo local por error de OpenAI: ${message}`,
         source: 'local',

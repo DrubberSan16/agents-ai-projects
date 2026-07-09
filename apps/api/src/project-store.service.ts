@@ -343,6 +343,51 @@ export class ProjectStoreService {
     return existsSync(reportPath) ? reportPath : undefined;
   }
 
+  getLatestAgentRun(
+    project: ProjectRecord,
+    agentKey: AgentKey,
+  ):
+    | {
+        id: string;
+        agentKey: AgentKey;
+        output: string;
+        reportPath?: string;
+        updatedAt: string;
+      }
+    | undefined {
+    return this.withDb(project, (db) =>
+      db
+        .prepare(
+          `SELECT id, agentKey, output, reportPath, updatedAt
+           FROM agent_runs
+           WHERE agentKey = ? AND TRIM(output) != ''
+           ORDER BY updatedAt DESC
+           LIMIT 1`,
+        )
+        .get(agentKey) as
+        | {
+            id: string;
+            agentKey: AgentKey;
+            output: string;
+            reportPath?: string;
+            updatedAt: string;
+          }
+        | undefined,
+    );
+  }
+
+  saveAgentOutputReport(
+    project: ProjectRecord,
+    agentKey: AgentKey,
+    content: string,
+  ): string {
+    const reportDir = join(this.ensureAgentDirectory(project.projectPath), 'reports');
+    this.ensureDirectory(reportDir);
+    const reportPath = join(reportDir, `${agentKey}-latest-report.md`);
+    writeFileSync(reportPath, content, 'utf8');
+    return reportPath;
+  }
+
   saveDeployment(
     project: ProjectRecord,
     deployment: Omit<DeploymentInfo, 'id' | 'createdAt'>,
@@ -410,6 +455,22 @@ export class ProjectStoreService {
          SET status = 'resolved'
          WHERE id = ?`,
       ).run(notificationId);
+    });
+  }
+
+  resolveOpenNotifications(
+    project: ProjectRecord,
+    agentKey: AgentKey,
+    messageContains: string,
+  ): void {
+    this.withDb(project, (db) => {
+      db.prepare(
+        `UPDATE notifications
+         SET status = 'resolved'
+         WHERE agentKey = ?
+           AND status = 'open'
+           AND message LIKE ?`,
+      ).run(agentKey, `%${messageContains}%`);
     });
   }
 

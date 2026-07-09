@@ -71,6 +71,19 @@ export class OrchestratorController {
     return this.agentsService.resolveNotification(projectId, notificationId);
   }
 
+  @Get('projects/:projectId/agents/:agentKey/report/download')
+  downloadAgentReport(
+    @Param('projectId') projectId: string,
+    @Param('agentKey') agentKey: string,
+    @Res() response: Response,
+  ) {
+    if (!AGENT_KEYS.includes(agentKey as AgentKey)) {
+      throw new BadRequestException('Agente no soportado.');
+    }
+    const report = this.agentsService.getAgentReport(projectId, agentKey as AgentKey);
+    return response.download(report.path, report.fileName);
+  }
+
   @Get('projects/:projectId/testing-report/download')
   downloadTestingReport(
     @Param('projectId') projectId: string,

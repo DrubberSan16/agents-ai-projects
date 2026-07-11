@@ -105,6 +105,13 @@ interface DirectoryBrowserResult {
   directories: DirectoryEntry[]
 }
 
+interface PendingAttachment {
+  name: string
+  content: string
+  mimeType: string
+  kind: 'text' | 'image' | 'file'
+}
+
 const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:3100/api'
 
 const agents = [
@@ -166,6 +173,8 @@ const runningRun = ref<{ projectId: string; agentKey: AgentKey } | null>(null)
 const bootingApp = ref(true)
 const loadingProjects = ref(false)
 const creatingProject = ref(false)
+const notificationsOpen = ref(false)
+const approvingNotificationId = ref('')
 const errorMessage = ref('')
 const outputByProjectAgent = reactive<Record<string, ProjectAgentOutput>>({})
 const promptByAgent = reactive<Record<AgentKey, string>>({ ...defaultTextByAgent })
@@ -173,7 +182,7 @@ const analysisOptions = reactive({
   deepAnalysis: false,
 })
 const liveLogsByProjectAgent = reactive<Record<string, ProjectAgentLogs>>({})
-const pendingDocuments = ref<Array<{ name: string; content: string }>>([])
+const pendingDocuments = ref<PendingAttachment[]>([])
 let liveLogTimer: number | undefined
 
 const createForm = reactive<{
@@ -213,6 +222,8 @@ const selectedProject = computed(() =>
 const activeAgentMeta = computed(() => agents.find((agent) => agent.key === activeAgent.value))
 
 const canRunAgent = computed(() => Boolean(selectedProject.value && !runningRun.value))
+
+const openNotifications = computed(() => selectedProject.value?.notifications ?? [])
 
 const currentOutput = computed(() => {
   const projectId = selectedProjectId.value
@@ -345,7 +356,7 @@ async function runCurrentAgent() {
   try {
     const payload = {
       prompt: promptByAgent[agentKey],
-      documents: agentKey === 'analysis' ? pendingDocuments.value : [],
+      documents: pendingDocuments.value,
       deepAnalysis: agentKey === 'analysis' ? analysisOptions.deepAnalysis : undefined,
     }
     const result = await api<RunAgentResult>(
@@ -362,9 +373,7 @@ async function runCurrentAgent() {
       agentKey,
       'Finalizado. Resultado guardado en la memoria del proyecto.',
     )
-    if (agentKey === 'analysis') {
-      pendingDocuments.value = []
-    }
+    pendingDocuments.value = []
   } catch (error) {
     appendLiveLog(
       projectId,
@@ -382,13 +391,54 @@ async function handleDocumentUpload(event: Event) {
   const input = event.target as HTMLInputElement
   const files = Array.from(input.files ?? [])
   const documents = await Promise.all(
-    files.map(async (file) => ({
-      name: file.name,
-      content: isTextLikeFile(file) ? await file.text() : unsupportedDocumentContent(file),
-    })),
+    files.map(async (file): Promise<PendingAttachment> => {
+      if (isImageFile(file)) {
+        return {
+          name: file.name,
+          content: await readFileAsDataUrl(file),
+          mimeType: file.type || inferImageMimeType(file.name),
+          kind: 'image',
+        }
+      }
+
+      return {
+        name: file.name,
+        content: isTextLikeFile(file) ? await file.text() : unsupportedDocumentContent(file),
+        mimeType: file.type || 'text/plain',
+        kind: isTextLikeFile(file) ? 'text' : 'file',
+      }
+    }),
   )
   pendingDocuments.value = [...pendingDocuments.value, ...documents]
   input.value = ''
+}
+
+function isImageFile(file: File) {
+  const extension = file.name.split('.').pop()?.toLowerCase() ?? ''
+  return file.type.startsWith('image/') || ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(extension)
+}
+
+function inferImageMimeType(name: string) {
+  const extension = name.split('.').pop()?.toLowerCase()
+  if (extension === 'jpg' || extension === 'jpeg') {
+    return 'image/jpeg'
+  }
+  if (extension === 'webp') {
+    return 'image/webp'
+  }
+  if (extension === 'gif') {
+    return 'image/gif'
+  }
+  return 'image/png'
+}
+
+function readFileAsDataUrl(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(String(reader.result ?? ''))
+    reader.onerror = () => reject(reader.error ?? new Error('No se pudo leer la imagen.'))
+    reader.readAsDataURL(file)
+  })
 }
 
 function isTextLikeFile(file: File) {
@@ -448,6 +498,44 @@ async function resolveNotification(notificationId: string) {
     upsertProject(project)
   } catch (error) {
     errorMessage.value = getErrorMessage(error)
+  }
+}
+
+async function approveNotification(notification: ProjectNotification) {
+  const project = selectedProject.value
+  if (!project || runningRun.value) {
+    return
+  }
+  approvingNotificationId.value = notification.id
+  runningRun.value = { projectId: project.id, agentKey: notification.agentKey }
+  activeAgent.value = notification.agentKey
+  setProjectOutput(project.id, notification.agentKey, '')
+  errorMessage.value = ''
+  startLiveLogs(project.id, notification.agentKey, project.name)
+  appendLiveLog(
+    project.id,
+    notification.agentKey,
+    `Aprobacion recibida. Ejecutando: ${notification.message}`,
+  )
+  try {
+    const result = await api<RunAgentResult>(
+      `/projects/${project.id}/notifications/${notification.id}/approve`,
+      { method: 'POST' },
+    )
+    upsertProject(result.project)
+    setProjectOutput(result.project.id, notification.agentKey, result.output)
+    appendLiveLog(
+      result.project.id,
+      notification.agentKey,
+      'Aprobacion ejecutada y resultado guardado.',
+    )
+  } catch (error) {
+    appendLiveLog(project.id, notification.agentKey, 'No se pudo ejecutar la aprobacion.')
+    errorMessage.value = getErrorMessage(error)
+  } finally {
+    clearLiveLogTimer()
+    runningRun.value = null
+    approvingNotificationId.value = ''
   }
 }
 
@@ -837,19 +925,61 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
 
       <p v-if="errorMessage" class="error-banner">{{ errorMessage }}</p>
 
-      <div v-if="selectedProject?.notifications.length" class="notifications">
-        <div
-          v-for="notification in selectedProject.notifications"
-          :key="notification.id"
-          class="notification"
+      <section v-if="selectedProject" class="notification-center">
+        <button
+          type="button"
+          class="notification-toggle"
+          :class="{ active: notificationsOpen }"
+          @click="notificationsOpen = !notificationsOpen"
         >
           <Bell :size="17" />
-          <span>{{ notification.message }}</span>
-          <button type="button" title="Resolver" @click="resolveNotification(notification.id)">
-            <Check :size="16" />
-          </button>
+          <span>Notificaciones</span>
+          <strong>{{ openNotifications.length }}</strong>
+        </button>
+
+        <div v-if="notificationsOpen" class="notifications">
+          <div v-if="!openNotifications.length" class="notification empty">
+            <Check :size="17" />
+            <span>No hay notificaciones pendientes.</span>
+          </div>
+          <article
+            v-for="notification in openNotifications"
+            :key="notification.id"
+            class="notification"
+            :class="`level-${notification.level}`"
+          >
+            <Bell :size="17" />
+            <div>
+              <strong>{{ agents.find((agent) => agent.key === notification.agentKey)?.title }}</strong>
+              <span>{{ notification.message }}</span>
+            </div>
+            <div class="notification-actions">
+              <button
+                type="button"
+                class="approve-action"
+                :disabled="Boolean(runningRun)"
+                @click="approveNotification(notification)"
+              >
+                <Loader2
+                  v-if="approvingNotificationId === notification.id"
+                  class="spin"
+                  :size="15"
+                />
+                <Check v-else :size="15" />
+                Aprobar
+              </button>
+              <button
+                type="button"
+                class="icon-action"
+                title="Descartar"
+                @click="resolveNotification(notification.id)"
+              >
+                <X :size="15" />
+              </button>
+            </div>
+          </article>
         </div>
-      </div>
+      </section>
 
       <section class="timeline" aria-label="Linea de tiempo de agentes">
         <button
@@ -908,11 +1038,11 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
             <span>Analisis profundo</span>
           </label>
 
-          <div v-if="activeAgent === 'analysis'" class="document-upload">
+          <div class="document-upload">
             <label class="file-button">
               <Upload :size="17" />
-              Documentos
-              <input multiple type="file" @change="handleDocumentUpload" />
+              Adjuntos / imagenes
+              <input multiple type="file" accept="image/*,.txt,.md,.csv,.json,.xml,.yaml,.yml,.html,.css,.js,.ts,.tsx,.vue,.java,.sql,.prisma" @change="handleDocumentUpload" />
             </label>
             <span>{{ pendingDocuments.length }} pendientes</span>
           </div>

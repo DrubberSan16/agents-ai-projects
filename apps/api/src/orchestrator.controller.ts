@@ -46,7 +46,15 @@ export class OrchestratorController {
   @Post('projects/:projectId/documents')
   addDocuments(
     @Param('projectId') projectId: string,
-    @Body() body: { documents?: Array<{ name: string; content: string }> },
+    @Body()
+    body: {
+      documents?: Array<{
+        name: string;
+        content: string;
+        mimeType?: string;
+        kind?: 'text' | 'image' | 'file';
+      }>;
+    },
   ) {
     return this.agentsService.addDocuments(projectId, body.documents ?? []);
   }
@@ -69,6 +77,14 @@ export class OrchestratorController {
     @Param('notificationId') notificationId: string,
   ) {
     return this.agentsService.resolveNotification(projectId, notificationId);
+  }
+
+  @Post('projects/:projectId/notifications/:notificationId/approve')
+  approveNotification(
+    @Param('projectId') projectId: string,
+    @Param('notificationId') notificationId: string,
+  ) {
+    return this.agentsService.approveNotification(projectId, notificationId);
   }
 
   @Get('projects/:projectId/agents/:agentKey/report/download')

@@ -206,7 +206,6 @@ button:disabled {
 
 .segmented button,
 .project-list button,
-.notification button,
 .section-title button {
   border: 0;
   background: transparent;
@@ -308,8 +307,7 @@ select:focus {
   text-transform: uppercase;
 }
 
-.section-title button,
-.notification button {
+.section-title button {
   width: 32px;
   height: 32px;
   display: grid;
@@ -318,8 +316,7 @@ select:focus {
   color: var(--muted);
 }
 
-.section-title button:hover,
-.notification button:hover {
+.section-title button:hover {
   background: var(--surface-soft);
   color: var(--teal);
 }
@@ -418,27 +415,119 @@ h2 {
   font-weight: 800;
 }
 
+.notification-center {
+  display: grid;
+  justify-items: end;
+  gap: 8px;
+}
+
+.notification-toggle {
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0 10px;
+  background: var(--surface);
+  color: var(--text);
+  font-weight: 900;
+}
+
+.notification-toggle.active,
+.notification-toggle:hover {
+  border-color: var(--teal);
+  color: var(--teal);
+}
+
+.notification-toggle strong {
+  min-width: 24px;
+  min-height: 24px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  background: var(--amber-soft);
+  color: #533707;
+  font-size: 12px;
+}
+
 .notifications {
+  width: min(720px, 100%);
   display: grid;
   gap: 8px;
 }
 
 .notification {
-  min-height: 44px;
+  min-height: 62px;
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
-  gap: 9px;
-  padding: 8px 10px;
+  gap: 10px;
+  padding: 10px;
   border: 1px solid #f1d397;
   border-radius: 8px;
   background: var(--amber-soft);
   color: #533707;
 }
 
+.notification.level-info {
+  border-color: #b8d7ff;
+  background: #eef6ff;
+  color: #194a7a;
+}
+
+.notification.level-approval {
+  border-color: #b9ddce;
+  background: var(--green-soft);
+  color: #175b40;
+}
+
+.notification.empty {
+  grid-template-columns: auto minmax(0, 1fr);
+  background: var(--surface);
+  color: var(--muted);
+}
+
+.notification div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
 .notification span {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.notification-actions {
+  display: flex;
+  align-items: center;
+  justify-content: end;
+  gap: 7px;
+}
+
+.approve-action {
+  min-height: 34px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  border-radius: 8px;
+  padding: 0 10px;
+  background: var(--teal);
+  color: #fff;
+  font-weight: 900;
+}
+
+.icon-action {
+  width: 34px;
+  min-height: 34px;
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--muted);
 }
 
 .timeline {

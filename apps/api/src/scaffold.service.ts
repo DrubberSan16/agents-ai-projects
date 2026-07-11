@@ -26,6 +26,7 @@ interface BusinessContext {
   primaryEntity: string;
   primaryEntitySlug: string;
   primaryEntityClass: string;
+  isErp: boolean;
 }
 
 interface ApplicationFeatureModule {
@@ -45,15 +46,21 @@ export class ScaffoldService {
     rules: string,
     ticketId: string,
   ): ScaffoldResult {
-    if (project.mode === 'existing' && !this.isEffectivelyEmpty(project.projectPath)) {
-      return this.createExistingProjectBrief(project, prompt, rules, ticketId);
-    }
-
     if (targetType === 'executable') {
       return this.createJavaExecutable(project, prompt, rules);
     }
 
-    return this.createWebWorkspace(project, prompt, rules);
+    const result = this.createWebWorkspace(project, prompt, rules);
+    if (project.mode === 'existing' && !this.isEffectivelyEmpty(project.projectPath)) {
+      const brief = this.createExistingProjectBrief(project, prompt, rules, ticketId);
+      return {
+        summary: `${result.summary}\n\nTambien se genero un brief de integracion en .agents-ai para trazabilidad del proyecto existente.`,
+        files: [...result.files, ...brief.files],
+        commands: result.commands,
+      };
+    }
+
+    return result;
   }
 
   private createExistingProjectBrief(
@@ -288,6 +295,18 @@ ${context.featureModules.map((module) => `- ${module.name}: ${module.description
   ): ScaffoldResult {
     const files: string[] = [];
     const context = this.buildBusinessContext(project, prompt, rules);
+    const domainImports = context.featureModules
+      .map(
+        (module) =>
+          `import { ${module.className}Controller } from './domain/${module.slug}/${module.slug}.controller';\nimport { ${module.className}Service } from './domain/${module.slug}/${module.slug}.service';`,
+      )
+      .join('\n');
+    const domainControllers = context.featureModules
+      .map((module) => `${module.className}Controller`)
+      .join(',\n    ');
+    const domainProviders = context.featureModules
+      .map((module) => `${module.className}Service`)
+      .join(',\n    ');
     const rootPackage = {
       name: project.slug,
       private: true,
@@ -451,6 +470,7 @@ import { ReportsController } from './reports.controller';
 import { ReportsService } from './reports.service';
 import { SecurityController } from './security.controller';
 import { SecurityService } from './security.service';
+${domainImports}
 
 @Module({
   controllers: [
@@ -460,6 +480,7 @@ import { SecurityService } from './security.service';
     MaintainersController,
     ReportsController,
     SecurityController,
+    ${domainControllers},
   ],
   providers: [
     ApplicationModulesService,
@@ -467,6 +488,7 @@ import { SecurityService } from './security.service';
     MaintainersService,
     ReportsService,
     SecurityService,
+    ${domainProviders},
   ],
 })
 export class AppModule {}
@@ -730,6 +752,209 @@ export class ApplicationModulesController {
 `,
       ),
     );
+
+    for (const module of context.featureModules) {
+      files.push(
+        this.writeGenerated(
+          join(project.projectPath, `apps/api/src/domain/${module.slug}/${module.slug}.types.ts`),
+          `export type ${module.className}Status = 'Pendiente' | 'En proceso' | 'Aprobado' | 'Cerrado' | 'Bloqueado';
+export type ${module.className}Priority = 'Baja' | 'Media' | 'Alta' | 'Critica';
+
+export interface ${module.className}Record {
+  id: string;
+  code: string;
+  name: string;
+  description: string;
+  status: ${module.className}Status;
+  priority: ${module.className}Priority;
+  owner: string;
+  businessData: Record<string, string | number | boolean>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface Create${module.className}Dto {
+  code?: string;
+  name?: string;
+  description?: string;
+  priority?: ${module.className}Priority;
+  owner?: string;
+  businessData?: Record<string, string | number | boolean>;
+}
+
+export interface Update${module.className}Dto extends Partial<Create${module.className}Dto> {
+  status?: ${module.className}Status;
+}
+`,
+        ),
+      );
+
+      files.push(
+        this.writeGenerated(
+          join(project.projectPath, `apps/api/src/domain/${module.slug}/${module.slug}.service.ts`),
+          `import { Injectable } from '@nestjs/common';
+import type {
+  Create${module.className}Dto,
+  ${module.className}Record,
+  ${module.className}Status,
+  Update${module.className}Dto,
+} from './${module.slug}.types';
+
+@Injectable()
+export class ${module.className}Service {
+  private records: ${module.className}Record[] = [
+    {
+      id: '${module.slug}-1',
+      code: '${module.slug.toUpperCase()}-001',
+      name: '${this.escapeTsString(module.name)} inicial',
+      description: '${this.escapeTsString(module.description)}',
+      status: 'Pendiente',
+      priority: 'Media',
+      owner: 'admin',
+      businessData: {
+        module: '${this.escapeTsString(module.name)}',
+        rulesApplied: ${module.rules.length},
+      },
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    },
+  ];
+
+  list(search?: string) {
+    const normalized = search?.trim().toLowerCase();
+    if (!normalized) {
+      return this.records;
+    }
+    return this.records.filter(
+      (record) =>
+        record.code.toLowerCase().includes(normalized) ||
+        record.name.toLowerCase().includes(normalized) ||
+        record.description.toLowerCase().includes(normalized),
+    );
+  }
+
+  dashboard() {
+    return {
+      module: '${this.escapeTsString(module.name)}',
+      total: this.records.length,
+      pending: this.records.filter((record) => record.status === 'Pendiente').length,
+      closed: this.records.filter((record) => record.status === 'Cerrado').length,
+      rules: ${JSON.stringify(module.rules, null, 6)},
+    };
+  }
+
+  get(id: string) {
+    return this.records.find((record) => record.id === id);
+  }
+
+  create(input: Create${module.className}Dto) {
+    const now = new Date().toISOString();
+    const record: ${module.className}Record = {
+      id: \`${module.slug}-\${this.records.length + 1}\`,
+      code: input.code?.trim() || \`${module.slug.toUpperCase()}-\${String(this.records.length + 1).padStart(3, '0')}\`,
+      name: input.name?.trim() || 'Nuevo ${this.escapeTsString(module.name)}',
+      description: input.description?.trim() || '${this.escapeTsString(module.description)}',
+      status: 'Pendiente',
+      priority: input.priority ?? 'Media',
+      owner: input.owner?.trim() || 'admin',
+      businessData: input.businessData ?? {},
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.records.unshift(record);
+    return record;
+  }
+
+  update(id: string, input: Update${module.className}Dto) {
+    const record = this.get(id);
+    if (!record) {
+      return undefined;
+    }
+    record.code = input.code?.trim() || record.code;
+    record.name = input.name?.trim() || record.name;
+    record.description = input.description?.trim() || record.description;
+    record.status = input.status ?? record.status;
+    record.priority = input.priority ?? record.priority;
+    record.owner = input.owner?.trim() || record.owner;
+    record.businessData = input.businessData ?? record.businessData;
+    record.updatedAt = new Date().toISOString();
+    return record;
+  }
+
+  updateStatus(id: string, status: ${module.className}Status) {
+    return this.update(id, { status });
+  }
+
+  remove(id: string) {
+    const index = this.records.findIndex((record) => record.id === id);
+    if (index < 0) {
+      return false;
+    }
+    this.records.splice(index, 1);
+    return true;
+  }
+}
+`,
+        ),
+      );
+
+      files.push(
+        this.writeGenerated(
+          join(project.projectPath, `apps/api/src/domain/${module.slug}/${module.slug}.controller.ts`),
+          `import { Body, Controller, Delete, Get, Param, Patch, Post, Put, Query } from '@nestjs/common';
+import { ${module.className}Service } from './${module.slug}.service';
+import type {
+  Create${module.className}Dto,
+  ${module.className}Status,
+  Update${module.className}Dto,
+} from './${module.slug}.types';
+
+@Controller('api/domain/${module.slug}')
+export class ${module.className}Controller {
+  constructor(private readonly service: ${module.className}Service) {}
+
+  @Get()
+  list(@Query('search') search?: string) {
+    return this.service.list(search);
+  }
+
+  @Get('dashboard')
+  dashboard() {
+    return this.service.dashboard();
+  }
+
+  @Get(':id')
+  detail(@Param('id') id: string) {
+    return this.service.get(id);
+  }
+
+  @Post()
+  create(@Body() body: Create${module.className}Dto) {
+    return this.service.create(body);
+  }
+
+  @Put(':id')
+  update(@Param('id') id: string, @Body() body: Update${module.className}Dto) {
+    return this.service.update(id, body);
+  }
+
+  @Patch(':id/status')
+  updateStatus(
+    @Param('id') id: string,
+    @Body() body: { status?: ${module.className}Status },
+  ) {
+    return this.service.updateStatus(id, body.status ?? 'En proceso');
+  }
+
+  @Delete(':id')
+  remove(@Param('id') id: string) {
+    return { deleted: this.service.remove(id) };
+  }
+}
+`,
+        ),
+      );
+    }
 
     files.push(
       this.writeGenerated(
@@ -1353,6 +1578,34 @@ export class SecurityController {
     );
 
     files.push(
+      this.writeIfMissing(
+        join(project.projectPath, 'apps/web/tsconfig.json'),
+        `${JSON.stringify(
+          {
+            include: ['src/**/*.ts', 'src/**/*.vue'],
+            compilerOptions: {
+              target: 'ES2022',
+              useDefineForClassFields: true,
+              module: 'ESNext',
+              moduleResolution: 'Bundler',
+              strict: true,
+              jsx: 'preserve',
+              sourceMap: true,
+              resolveJsonModule: true,
+              isolatedModules: true,
+              esModuleInterop: true,
+              lib: ['ES2022', 'DOM', 'DOM.Iterable'],
+              skipLibCheck: true,
+              types: ['node'],
+            },
+          },
+          null,
+          2,
+        )}\n`,
+      ),
+    );
+
+    files.push(
       this.writeGenerated(
         join(project.projectPath, 'apps/web/vite.config.ts'),
         `import { defineConfig } from 'vite';
@@ -1470,7 +1723,7 @@ const password = ref('Admin123!');
 const authenticated = ref(false);
 const message = ref('');
 const loading = ref(false);
-const activeView = ref<'operacion' | 'modulos' | 'mantenedores' | 'reporteria' | 'seguridad'>('operacion');
+const activeView = ref<'operacion' | 'modulos' | 'mantenedores' | 'reporteria' | 'seguridad'>('${context.isErp ? 'modulos' : 'operacion'}');
 const summary = ref<BusinessSummary | null>(null);
 const records = ref<BusinessRecord[]>([]);
 const applicationModules = ref<ApplicationModule[]>([]);
@@ -1664,7 +1917,7 @@ async function createModuleRecord() {
     <section v-else class="workspace">
       <header class="topbar">
         <div>
-          <p class="eyebrow">{{ summary?.domain ?? '${context.primaryEntity}' }}</p>
+          <p class="eyebrow">${context.isErp ? 'ERP operativo' : `{{ summary?.domain ?? '${context.primaryEntity}' }}`}</p>
           <h1>{{ summary?.project ?? '${project.name}' }}</h1>
         </div>
         <button type="button" @click="loadBusiness">
@@ -1674,10 +1927,10 @@ async function createModuleRecord() {
 
       <nav class="tabs" aria-label="Modulos principales">
         <button type="button" :class="{ active: activeView === 'operacion' }" @click="activeView = 'operacion'">
-          Operacion
+          ${context.isErp ? 'Dashboard' : 'Operacion'}
         </button>
         <button type="button" :class="{ active: activeView === 'modulos' }" @click="activeView = 'modulos'">
-          Modulos
+          ${context.isErp ? 'ERP modulos' : 'Modulos'}
         </button>
         <button type="button" :class="{ active: activeView === 'mantenedores' }" @click="activeView = 'mantenedores'">
           Mantenedores
@@ -1760,7 +2013,7 @@ async function createModuleRecord() {
 
       <section v-if="activeView === 'modulos'" class="grid">
         <article class="panel">
-          <h2>Modulos solicitados</h2>
+          <h2>${context.isErp ? 'Modulos ERP operativos' : 'Modulos solicitados'}</h2>
           <div class="maintainer-list">
             <button
               v-for="module in applicationModules"
@@ -2172,7 +2425,7 @@ button {
 
     return {
       summary:
-        `Se genero una aplicacion web funcional con API NestJS, UI Vue, CRUD completo para ${context.primaryEntity}, mantenedores, reporteria, seguridad inicial y documentacion tecnica.`,
+        `Se genero una aplicacion web funcional con API NestJS, UI Vue, CRUD completo para ${context.primaryEntity}, modulos fisicos por dominio (${context.featureModules.map((module) => module.name).join(', ')}), mantenedores, reporteria, seguridad inicial y documentacion tecnica.`,
       files,
       commands: ['npm install', 'npm run dev'],
     };
@@ -2492,11 +2745,26 @@ java -jar target/${project.slug}-0.1.0.jar
     prompt: string,
     rules: string,
   ): BusinessContext {
+    const source = `${project.name}\n${prompt}\n${rules}`;
+    const isErp = this.isErpRequest(source);
     const extractedRules = this.extractRules(rules, prompt);
-    const entities = this.extractEntities(rules, project.name);
+    const entities = isErp
+      ? [
+          'Producto',
+          'Categoria de producto',
+          'Almacen',
+          'Ubicacion de almacen',
+          'Movimiento de inventario',
+          'Kardex',
+          'Cliente',
+          'Proveedor',
+          'Usuario',
+        ]
+      : this.extractEntities(rules, project.name);
     const featureModules = this.buildFeatureModules(entities, extractedRules, prompt, rules);
     const primaryEntity =
-      featureModules.find((module) => !/^usuario|user|admin/i.test(module.name))?.name ??
+      (isErp ? 'Movimiento de inventario' : undefined) ??
+      featureModules.find((module) => !/^usuario|user|admin|rol|permiso|reporte|auditoria/i.test(module.name))?.name ??
       featureModules[0]?.name ??
       'Registro de negocio';
     const description =
@@ -2513,6 +2781,7 @@ java -jar target/${project.slug}-0.1.0.jar
       primaryEntity,
       primaryEntitySlug: this.slugify(primaryEntity),
       primaryEntityClass: this.toClassName(primaryEntity),
+      isErp,
     };
   }
 
@@ -2522,6 +2791,26 @@ java -jar target/${project.slug}-0.1.0.jar
     prompt: string,
     rawRules: string,
   ): ApplicationFeatureModule[] {
+    const source = `${prompt}\n${rawRules}`;
+    const keywordModules = this.isErpRequest(source)
+      ? [
+          'Dashboard ERP',
+          'Productos',
+          'Categorias de producto',
+          'Almacenes',
+          'Ubicaciones de almacen',
+          'Inventario',
+          'Movimientos de inventario',
+          'Kardex',
+          'Compras',
+          'Ventas',
+          'Clientes',
+          'Proveedores',
+          'Usuarios',
+          'Roles',
+          'Reportes',
+        ]
+      : this.extractKnownModuleNames(source);
     const moduleHints = `${prompt}\n${rawRules}`
       .split(/\r?\n/)
       .flatMap((line) => {
@@ -2533,8 +2822,12 @@ java -jar target/${project.slug}-0.1.0.jar
       });
 
     const names = Array.from(
-      new Set([...entities, ...moduleHints].map((name) => this.titleCase(name)).filter(Boolean)),
-    ).slice(0, 8);
+      new Set(
+        [...keywordModules, ...entities, ...moduleHints]
+          .map((name) => this.titleCase(name))
+          .filter((name) => name && !this.isInvalidEntityName(name)),
+      ),
+    ).slice(0, this.isErpRequest(source) ? 15 : 8);
 
     const safeNames = names.length ? names : ['Operacion principal'];
     return safeNames.map((name) => {
@@ -2561,6 +2854,16 @@ java -jar target/${project.slug}-0.1.0.jar
         rules: relatedRules.length ? relatedRules : rules.slice(0, 5),
       };
     });
+  }
+
+  private isErpRequest(source: string): boolean {
+    const normalized = source
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase();
+    return /\b(erp|inventario|almacen|almacenes|producto|productos|kardex|compras|ventas|proveedor|cliente|wms|stock|existencias)\b/.test(
+      normalized,
+    );
   }
 
   private extractRules(rules: string, prompt: string): string[] {
@@ -2608,13 +2911,68 @@ java -jar target/${project.slug}-0.1.0.jar
       .split(/\r?\n/)
       .filter((line) => /^#{2,4}\s+/.test(line))
       .map((line) => line.replace(/^#{2,4}\s+/, '').trim())
-      .filter((line) => /cliente|orden|pedido|producto|usuario|ticket|tarea|proyecto|servicio|registro/i.test(line));
+      .filter(
+        (line) =>
+          /cliente|orden|pedido|producto|usuario|ticket|tarea|servicio|inventario|almacen|kardex|rol|permiso|reporte|auditoria/i.test(
+            line,
+          ) && !this.isInvalidEntityName(line),
+      );
 
     const fallback = this.titleCase(projectName.replace(/\b(app|web|sistema|project|proyecto)\b/gi, '').trim()) || 'Registro de negocio';
     return Array.from(new Set([...explicitEntities, ...headingEntities, fallback, 'Usuario']))
       .map((entity) => this.truncateText(entity, 40))
-      .filter(Boolean)
+      .filter((entity) => Boolean(entity) && !this.isInvalidEntityName(entity))
       .slice(0, 6);
+  }
+
+  private extractKnownModuleNames(source: string): string[] {
+    const normalized = source
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase();
+    const catalog = [
+      ['usuarios', 'Usuarios'],
+      ['roles', 'Roles'],
+      ['permisos', 'Permisos'],
+      ['productos', 'Productos'],
+      ['categorias', 'Categorias de producto'],
+      ['almacenes', 'Almacenes'],
+      ['ubicaciones', 'Ubicaciones de almacen'],
+      ['inventario', 'Inventario'],
+      ['movimientos', 'Movimientos de inventario'],
+      ['kardex', 'Kardex'],
+      ['auditoria', 'Auditoria'],
+      ['reportes', 'Reportes'],
+      ['clientes', 'Clientes'],
+      ['proveedores', 'Proveedores'],
+      ['compras', 'Compras'],
+      ['ventas', 'Ventas'],
+      ['pedidos', 'Pedidos'],
+      ['facturas', 'Facturas'],
+      ['notificaciones', 'Notificaciones'],
+      ['despliegues', 'Despliegues'],
+      ['tickets', 'Tickets de ejecucion'],
+    ] as const;
+
+    return catalog
+      .filter(([term]) => normalized.includes(term))
+      .map(([, name]) => name);
+  }
+
+  private isInvalidEntityName(value: string): boolean {
+    const normalized = value
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .toLowerCase()
+      .trim();
+    return (
+      /^\d+(\.\d+)*\s+/.test(normalized) ||
+      /^(resumen|logica|reglas|arquitectura|stack|estructura|diagramas|criterios|dudas|objetivo|alcance|resultado|riesgos|pendientes)\b/.test(
+        normalized,
+      ) ||
+      normalized.includes('reglas de negocio recomendadas') ||
+      normalized.length > 48
+    );
   }
 
   private renderArchitectureDoc(

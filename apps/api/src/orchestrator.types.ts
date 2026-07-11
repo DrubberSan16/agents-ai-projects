@@ -92,6 +92,8 @@ export interface RunAgentInput {
   documents?: Array<{
     name: string;
     content: string;
+    mimeType?: string;
+    kind?: 'text' | 'image' | 'file';
   }>;
   deepAnalysis?: boolean;
   targetType?: ProjectTarget;

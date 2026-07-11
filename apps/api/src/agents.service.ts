@@ -37,6 +37,8 @@ interface ScanOptions {
 interface ProjectDocument {
   name: string;
   content: string;
+  mimeType?: string;
+  kind?: 'text' | 'image' | 'file';
   createdAt?: string;
 }
 
@@ -97,11 +99,15 @@ export class AgentsService {
 
   addDocuments(
     projectId: string,
-    documents: Array<{ name: string; content: string }>,
+    documents: Array<{ name: string; content: string; mimeType?: string; kind?: 'text' | 'image' | 'file' }>,
   ): ProjectSnapshot {
     const project = this.store.getProject(projectId);
     documents.forEach((document) => {
-      const content = this.normalizeDocumentContent(document.name, document.content);
+      const content = this.normalizeDocumentContent(
+        document.name,
+        document.content,
+        document.mimeType,
+      );
       if (content) {
         this.store.addDocument(project, document.name, content);
       }
@@ -113,6 +119,22 @@ export class AgentsService {
     const project = this.store.getProject(projectId);
     this.store.resolveNotification(project, notificationId);
     return this.store.getProjectSnapshot(project.id);
+  }
+
+  async approveNotification(
+    projectId: string,
+    notificationId: string,
+  ): Promise<RunAgentResult> {
+    const project = this.store.getProject(projectId);
+    const notification = this.store.getNotification(project, notificationId);
+    if (!notification || notification.status !== 'open') {
+      throw new BadRequestException('La notificacion ya no esta disponible.');
+    }
+
+    this.store.resolveNotification(project, notificationId);
+    return this.runAgent(project.id, notification.agentKey, {
+      prompt: notification.message,
+    });
   }
 
   getTestingReportPath(projectId: string): string {
@@ -163,7 +185,11 @@ export class AgentsService {
     const project = this.store.getProject(projectId);
     if (input.documents?.length) {
       input.documents.forEach((document) => {
-        const content = this.normalizeDocumentContent(document.name, document.content);
+        const content = this.normalizeDocumentContent(
+          document.name,
+          document.content,
+          document.mimeType,
+        );
         if (content) {
           this.store.addDocument(project, document.name, content);
         }
@@ -199,6 +225,7 @@ export class AgentsService {
     );
     const scan = this.scanProject(project.projectPath, { deep: deepAnalysis });
     const documents = this.store.getDocuments(project);
+    const images = this.extractImageAttachments(documents);
 
     if (!scan.files.length && !prompt && !documents.length) {
       this.store.addNotification(
@@ -211,7 +238,7 @@ export class AgentsService {
 
     const aiResult = await this.ai.generate({
       system:
-        'Eres el Agente 1 de levantamiento y arquitectura. Generas un markdown tecnico, accionable y suficientemente descriptivo para que un desarrollador implemente el sistema sin volver a leer todo el proyecto.',
+        'Eres el Agente 1, consultor senior experto en levantamiento de informacion, arquitectura de software y analisis funcional. Generas un markdown tecnico, accionable y suficientemente descriptivo para que un desarrollador implemente el sistema sin volver a leer todo el proyecto.',
       prompt: `Proyecto: ${project.name}
 Ruta: ${project.projectPath}
 Tipo objetivo: ${project.targetType}
@@ -247,6 +274,7 @@ Devuelve SOLO markdown con estas secciones obligatorias:
 
 Para proyectos nuevos, propone una arquitectura completa para ${project.targetType === 'executable' ? 'Java ejecutable empaquetable en JAR' : 'NestJS + Vue'} con capas, modulos, DTOs, servicios, persistencia, autenticacion, validaciones, testing y despliegue local.`,
       fallback: () => this.localAnalysis(project, prompt, scan, documents),
+      images,
     });
 
     this.store.writeBusinessRules(project, aiResult.text);
@@ -267,6 +295,8 @@ Para proyectos nuevos, propone una arquitectura completa para ${project.targetTy
   ): Promise<RunAgentResult> {
     const prompt = input.prompt?.trim() ?? '';
     const rules = this.store.readBusinessRules(project);
+    const documents = this.store.getDocuments(project);
+    const images = this.extractImageAttachments(documents);
     const requestedChange = prompt || this.inferDeveloperRequest(project, rules);
     const targetType = this.resolveTargetType(project, requestedChange, input.targetType);
     const updatedProject =
@@ -298,15 +328,33 @@ Para proyectos nuevos, propone una arquitectura completa para ${project.targetTy
       );
     }
 
+    const implementationScan = this.scanProject(updatedProject.projectPath, { deep: true });
+    const developmentGap = this.buildDevelopmentGap(
+      updatedProject,
+      targetType,
+      requestedChange,
+      rules,
+      implementationScan,
+    );
+
     try {
       const aiResult = await this.ai.generate({
         system:
-          'Eres el Agente 2 desarrollador tipo Codex. Lees reglas de negocio, interpretas la arquitectura definida y produces una implementacion concreta: archivos, modulos, endpoints, UI, validaciones, pruebas y comandos. No te limites a un plan generico.',
+          'Eres el Agente 2 desarrollador senior experto en implementacion full-stack tipo Codex. Lees reglas de negocio, inspeccionas archivos reales, comparas lo existente contra lo solicitado y produces una implementacion concreta: archivos, modulos, endpoints, UI, validaciones, pruebas y comandos. No te limites a un plan generico ni a documentacion.',
         prompt: `Proyecto: ${updatedProject.name}
 Tipo objetivo: ${targetType}
 
 Reglas de negocio vigentes:
 ${this.truncate(rules, 12000)}
+
+Inventario tecnico real del proyecto:
+${developmentGap}
+
+Muestras de archivos actuales:
+${this.truncate(this.renderSamples(implementationScan), 30000)}
+
+Documentos e imagenes adjuntas:
+${this.renderDocuments(documents)}
 
 Solicitud del usuario:
 ${requestedChange}
@@ -326,9 +374,10 @@ Devuelve markdown con:
 12. Pruebas sugeridas
 13. Riesgos o pendientes.
 
-No generes modulos genericos vacios. Extrae entidades, reglas, flujos, validaciones y restricciones del analisis previo y materializalos en archivos concretos. Si el proyecto es nuevo, genera una aplicacion funcional completa segun las reglas, no solo una estructura base. Si falta detalle, implementa una version inicial coherente y marca los pendientes como dudas.`,
+No generes modulos genericos vacios. Extrae entidades, reglas, flujos, validaciones y restricciones del analisis previo y materializalos en archivos concretos. Antes de decir que algo fue implementado, valida si el archivo existe en el inventario tecnico. Lo que no exista debe quedar en la lista de archivos generados/modificados por el scaffold. Si el proyecto es nuevo, genera una aplicacion funcional completa segun las reglas, no solo una estructura base. Si falta detalle, implementa una version inicial coherente y marca los pendientes como dudas.`,
         fallback: () => this.localDeveloperPlan(updatedProject, targetType, requestedChange, rules),
         timeoutMs: this.getDeveloperTimeoutMs(),
+        images,
       });
 
       const ticket = this.store.createTicket(
@@ -345,6 +394,10 @@ No generes modulos genericos vacios. Extrae entidades, reglas, flujos, validacio
         ticket.id,
       );
       const output = `${aiResult.text}
+
+## Comparacion contra codigo existente
+
+${developmentGap}
 
 ## Resultado de ejecucion
 
@@ -422,6 +475,8 @@ ${message}
     const runId = this.store.createRun(project, 'tester', prompt);
     const scan = this.scanProject(project.projectPath);
     const rules = this.store.readBusinessRules(project);
+    const documents = this.store.getDocuments(project);
+    const images = this.extractImageAttachments(documents);
     const snapshot = this.store.getProjectSnapshot(project.id);
     const developerPrompt = this.buildTestingDeveloperPrompt(
       project,
@@ -433,7 +488,7 @@ ${message}
 
     const aiResult = await this.ai.generate({
       system:
-        'Eres el Agente 3 tester. Auditas seguridad, escalabilidad, arquitectura, testing y operacion. No ejecutas cambios; devuelves instrucciones priorizadas.',
+        'Eres el Agente 3, QA lead senior experto en testing, seguridad, escalabilidad, arquitectura y operacion. Auditas el proyecto con criterio profesional. No ejecutas cambios; devuelves instrucciones priorizadas.',
       prompt: `Proyecto: ${project.name}
 Tipo objetivo: ${project.targetType}
 
@@ -442,6 +497,9 @@ ${this.truncate(rules, 12000)}
 
 Ultimo ticket:
 ${snapshot.latestTicket?.summary ?? 'Sin ticket de desarrollo.'}
+
+Documentos e imagenes adjuntas:
+${this.renderDocuments(documents)}
 
 Arbol resumido:
 ${scan.files.join('\n') || 'Sin archivos detectados.'}
@@ -456,6 +514,7 @@ Devuelve un reporte markdown con: Resumen, Hallazgos criticos, Seguridad, Escala
 
 En la seccion "Prompt completo para Agente 2", incluye un bloque \`\`\`text con el prompt completo y listo para copiar. Debe contener objetivo, contexto, hallazgos, archivos/modulos a tocar, criterios de aceptacion y pruebas esperadas.`,
       fallback: () => this.localTestingReport(project, prompt, scan, rules),
+      images,
     });
 
     const reportPath = this.store.saveReport(project, aiResult.text);
@@ -701,6 +760,114 @@ ${message}
     );
   }
 
+  private buildDevelopmentGap(
+    project: ProjectRecord,
+    targetType: ProjectTarget,
+    prompt: string,
+    rules: string,
+    scan: ProjectScan,
+  ): string {
+    const files = new Set(scan.files.map((file) => file.replace(/\\/g, '/')));
+    const modules = this.extractDevelopmentModules(`${prompt}\n${rules}`);
+    const expected =
+      targetType === 'executable'
+        ? [
+            'pom.xml',
+            'src/main/java/com/agents/generated/Application.java',
+            'src/main/java/com/agents/generated/AuthController.java',
+            'src/main/java/com/agents/generated/BusinessController.java',
+            'src/main/java/com/agents/generated/BusinessService.java',
+            'src/main/resources/application.properties',
+          ]
+        : [
+            'package.json',
+            'apps/api/package.json',
+            'apps/api/src/main.ts',
+            'apps/api/src/app.module.ts',
+            'apps/api/src/auth.controller.ts',
+            'apps/api/src/business.controller.ts',
+            'apps/api/src/business.service.ts',
+            'apps/api/src/business.types.ts',
+            'apps/api/src/application-modules.controller.ts',
+            'apps/api/src/application-modules.service.ts',
+            'apps/api/src/maintainers.controller.ts',
+            'apps/api/src/reports.controller.ts',
+            'apps/api/src/security.controller.ts',
+            'apps/web/package.json',
+            'apps/web/src/App.vue',
+            'apps/web/src/main.ts',
+            'docs/architecture.md',
+            ...modules.flatMap((module) => [
+              `apps/api/src/domain/${module}/${module}.controller.ts`,
+              `apps/api/src/domain/${module}/${module}.service.ts`,
+              `apps/api/src/domain/${module}/${module}.types.ts`,
+            ]),
+          ];
+
+    const existing = expected.filter((file) => files.has(file));
+    const missing = expected.filter((file) => !files.has(file));
+    const controllers = scan.files.filter((file) => file.endsWith('.controller.ts'));
+    const services = scan.files.filter((file) => file.endsWith('.service.ts'));
+    const views = scan.files.filter((file) => file.endsWith('.vue') || file.endsWith('.tsx'));
+
+    return `### Inventario de implementacion
+
+- Tecnologia detectada: ${scan.technologies.join(', ') || 'sin detectar'}.
+- Archivos revisados: ${scan.files.length}.
+- Controladores existentes: ${controllers.length ? controllers.slice(0, 20).join(', ') : 'ninguno'}.
+- Servicios existentes: ${services.length ? services.slice(0, 20).join(', ') : 'ninguno'}.
+- Vistas existentes: ${views.length ? views.slice(0, 20).join(', ') : 'ninguna'}.
+
+### Modulos de negocio inferidos
+
+${modules.map((module) => `- ${module}`).join('\n') || '- business-records'}
+
+### Archivos esperados ya existentes
+
+${existing.map((file) => `- ${file}`).join('\n') || '- Ninguno de los archivos esperados existe todavia.'}
+
+### Archivos faltantes que el Agente 2 debe crear o modificar
+
+${missing.map((file) => `- ${file}`).join('\n') || '- No se detectan archivos esperados faltantes.'}
+
+### Regla operativa
+
+El Agente 2 no debe declarar una API, pantalla, CRUD o modulo como implementado si no aparece en archivos reales generados o modificados. Si falta, debe crearlo o actualizar el scaffold para materializarlo.`;
+  }
+
+  private extractDevelopmentModules(source: string): string[] {
+    const normalized = this.normalizeText(source);
+    const knownModules = [
+      ['usuarios', 'usuarios'],
+      ['roles', 'roles'],
+      ['permisos', 'permisos'],
+      ['productos', 'productos'],
+      ['categorias', 'categorias-producto'],
+      ['almacenes', 'almacenes'],
+      ['ubicaciones', 'ubicaciones-almacen'],
+      ['inventario', 'inventario'],
+      ['movimientos', 'movimientos-inventario'],
+      ['kardex', 'kardex'],
+      ['auditoria', 'auditoria'],
+      ['reportes', 'reportes'],
+      ['clientes', 'clientes'],
+      ['proveedores', 'proveedores'],
+      ['compras', 'compras'],
+      ['ventas', 'ventas'],
+      ['pedidos', 'pedidos'],
+      ['facturas', 'facturas'],
+      ['ticket', 'tickets'],
+      ['despliegue', 'despliegues'],
+      ['notificacion', 'notificaciones'],
+    ] as const;
+
+    const detected = knownModules
+      .filter(([term]) => normalized.includes(term))
+      .map(([, slug]) => slug);
+
+    return Array.from(new Set(detected)).slice(0, 10);
+  }
+
   private inferDeveloperRequest(project: ProjectRecord, rules: string): string {
     const entities = this.extractSectionLines(rules, [
       'Entidades y flujos',
@@ -905,25 +1072,86 @@ ${sample.content}
       .map(
         (document) => `### ${document.name}
 
-${this.truncate(this.normalizeDocumentContent(document.name, document.content), 6000)}`,
+${this.formatDocumentForPrompt(document)}`,
       )
       .join('\n\n');
   }
 
   private renderDocumentBusinessContent(documents: ProjectDocument[]): string {
     return documents
-      .map((document) => this.normalizeDocumentContent(document.name, document.content))
+      .map((document) => this.formatDocumentForPrompt(document))
       .filter((content) => content && !this.isUnsupportedDocumentNotice(content))
       .join('\n\n');
   }
 
-  private normalizeDocumentContent(name: string, content: string): string {
+  private formatDocumentForPrompt(document: ProjectDocument): string {
+    if (this.isImageDocument(document.content)) {
+      const meta = this.parseImageDocument(document.content);
+      return `[Imagen adjunta para analisis visual]
+Nombre: ${meta.name || document.name}
+Tipo: ${meta.mimeType}
+Uso esperado: interpretar pantallas, mockups, diagramas, formularios, flujos o referencias visuales junto con el prompt del usuario.`;
+    }
+
+    return this.truncate(
+      this.normalizeDocumentContent(document.name, document.content, document.mimeType),
+      6000,
+    );
+  }
+
+  private extractImageAttachments(
+    documents: ProjectDocument[],
+  ): Array<{ name: string; mimeType: string; dataUrl: string }> {
+    return documents
+      .filter((document) => this.isImageDocument(document.content))
+      .map((document) => {
+        const meta = this.parseImageDocument(document.content);
+        return {
+          name: meta.name || document.name,
+          mimeType: meta.mimeType,
+          dataUrl: meta.dataUrl,
+        };
+      })
+      .filter((image) => image.dataUrl.startsWith('data:image/'))
+      .slice(0, 6);
+  }
+
+  private isImageDocument(content: string): boolean {
+    return content.startsWith('[Imagen adjunta]') && content.includes('Contenido: data:image/');
+  }
+
+  private parseImageDocument(content: string): {
+    name: string;
+    mimeType: string;
+    dataUrl: string;
+  } {
+    return {
+      name: content.match(/^Nombre:\s*(.+)$/m)?.[1]?.trim() ?? '',
+      mimeType: content.match(/^Tipo:\s*(.+)$/m)?.[1]?.trim() ?? 'image/png',
+      dataUrl: content.match(/^Contenido:\s*(data:image\/[^\s]+)$/m)?.[1]?.trim() ?? '',
+    };
+  }
+
+  private normalizeDocumentContent(
+    name: string,
+    content: string,
+    mimeType?: string,
+  ): string {
     const raw = content?.trim() ?? '';
     if (!raw) {
       return '';
     }
 
     const lowerName = name.toLowerCase();
+    const type = mimeType?.toLowerCase() ?? '';
+    if (type.startsWith('image/') || raw.startsWith('data:image/')) {
+      const imageType = type || raw.match(/^data:([^;]+);base64,/)?.[1] || 'image/*';
+      return `[Imagen adjunta]
+Nombre: ${name}
+Tipo: ${imageType}
+Contenido: ${raw}`;
+    }
+
     if (lowerName.endsWith('.pdf') || raw.startsWith('%PDF-')) {
       return this.unsupportedDocumentNotice(
         'PDF',

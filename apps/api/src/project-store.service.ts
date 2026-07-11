@@ -448,6 +448,22 @@ export class ProjectStoreService {
     return item;
   }
 
+  getNotification(
+    project: ProjectRecord,
+    notificationId: string,
+  ): ProjectNotification | undefined {
+    return this.withDb(project, (db) =>
+      db
+        .prepare(
+          `SELECT id, agentKey, level, message, status, createdAt
+           FROM notifications
+           WHERE id = ?
+           LIMIT 1`,
+        )
+        .get(notificationId) as ProjectNotification | undefined,
+    );
+  }
+
   resolveNotification(project: ProjectRecord, notificationId: string): void {
     this.withDb(project, (db) => {
       db.prepare(

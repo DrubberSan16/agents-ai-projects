@@ -6,6 +6,11 @@ interface GenerateOptions {
   prompt: string;
   fallback: () => string;
   timeoutMs?: number;
+  images?: Array<{
+    name: string;
+    mimeType: string;
+    dataUrl: string;
+  }>;
 }
 
 @Injectable()
@@ -52,10 +57,26 @@ export class AiOrchestratorService {
       const result = await generateText({
         model: provider.responses(this.model as never),
         system: options.system,
-        prompt: options.prompt,
+        ...(options.images?.length
+          ? {
+              messages: [
+                {
+                  role: 'user',
+                  content: [
+                    { type: 'text', text: options.prompt },
+                    ...options.images.map((image) => ({
+                      type: 'image',
+                      image: this.imageDataUrlToBuffer(image.dataUrl),
+                      mediaType: image.mimeType,
+                    })),
+                  ],
+                },
+              ],
+            }
+          : { prompt: options.prompt }),
         temperature: 0.2,
         abortSignal: abortController.signal,
-      }).finally(() => {
+      } as never).finally(() => {
         if (timeout) {
           clearTimeout(timeout);
         }
@@ -68,11 +89,9 @@ export class AiOrchestratorService {
     } catch (error) {
       const rawMessage = error instanceof Error ? error.message : String(error);
       const timeoutMs = options.timeoutMs ?? this.requestTimeoutMs;
-      const message =
-        rawMessage === 'This operation was aborted'
-          ? `OpenAI no respondio antes de ${timeoutMs} ms. Sube el timeout del agente o reduce el tamano de la solicitud.`
-          : rawMessage;
-      if (!this.fallbackOnError) {
+      const message = this.humanizeOpenAiError(rawMessage, timeoutMs);
+      const shouldFallback = this.fallbackOnError || this.isQuotaError(rawMessage);
+      if (!shouldFallback) {
         throw new ServiceUnavailableException(message);
       }
       return {
@@ -80,5 +99,32 @@ export class AiOrchestratorService {
         source: 'local',
       };
     }
+  }
+
+  private humanizeOpenAiError(rawMessage: string, timeoutMs: number): string {
+    if (rawMessage === 'This operation was aborted') {
+      return `OpenAI no respondio antes de ${timeoutMs} ms. Sube el timeout del agente o reduce el tamano de la solicitud.`;
+    }
+
+    if (this.isQuotaError(rawMessage)) {
+      return 'La cuenta o proyecto de OpenAI excedio la cuota disponible. Revisa plan, billing, limites del proyecto o agrega credito. Mientras tanto se genero una respuesta local con el scaffold disponible.';
+    }
+
+    return rawMessage;
+  }
+
+  private isQuotaError(message: string): boolean {
+    const normalized = message.toLowerCase();
+    return (
+      normalized.includes('exceeded your current quota') ||
+      normalized.includes('insufficient_quota') ||
+      normalized.includes('billing details') ||
+      normalized.includes('check your plan')
+    );
+  }
+
+  private imageDataUrlToBuffer(dataUrl: string): Buffer {
+    const base64 = dataUrl.includes(',') ? dataUrl.split(',').at(-1) ?? '' : dataUrl;
+    return Buffer.from(base64, 'base64');
   }
 }

@@ -388,6 +388,41 @@ export class ProjectStoreService {
     return reportPath;
   }
 
+  saveTestingPdfReport(project: ProjectRecord, content: string): string {
+    return this.savePdfReport(project, 'testing-report', 'Reporte de Testing', content);
+  }
+
+  saveAgentOutputPdfReport(
+    project: ProjectRecord,
+    agentKey: AgentKey,
+    content: string,
+  ): string {
+    return this.savePdfReport(
+      project,
+      `${agentKey}-latest-report`,
+      `Reporte ${agentKey}`,
+      content,
+    );
+  }
+
+  savePdfReport(
+    project: ProjectRecord,
+    fileBaseName: string,
+    title: string,
+    content: string,
+  ): string {
+    const reportDir = join(this.ensureAgentDirectory(project.projectPath), 'reports');
+    this.ensureDirectory(reportDir);
+    const safeBaseName = this.safeFileName(fileBaseName).replace(/\.pdf$/i, '');
+    const reportPath = join(reportDir, `${safeBaseName}.pdf`);
+    this.writePdfReport(
+      reportPath,
+      `${title} - ${project.name}`,
+      `Proyecto: ${project.name}\nRuta: ${project.projectPath}\nGenerado: ${new Date().toISOString()}\n\n${content}`,
+    );
+    return reportPath;
+  }
+
   saveDeployment(
     project: ProjectRecord,
     deployment: Omit<DeploymentInfo, 'id' | 'createdAt'>,
@@ -740,6 +775,178 @@ export class ProjectStoreService {
   private safeFileName(value: string): string {
     const normalized = value.replace(/[/\\?%*:|"<>]/g, '-').trim();
     return normalized || 'documento.txt';
+  }
+
+  private writePdfReport(filePath: string, title: string, content: string): void {
+    const lines = this.renderPdfLines(title, content);
+    const pages = this.paginatePdfLines(lines);
+    const pageObjectIds = pages.map((_, index) => 3 + index * 2);
+    const contentObjectIds = pages.map((_, index) => 4 + index * 2);
+    const regularFontId = 3 + pages.length * 2;
+    const boldFontId = regularFontId + 1;
+    const monoFontId = boldFontId + 1;
+    const objects: string[] = [];
+
+    objects[1] = '<< /Type /Catalog /Pages 2 0 R >>';
+    objects[2] = `<< /Type /Pages /Kids [${pageObjectIds
+      .map((id) => `${id} 0 R`)
+      .join(' ')}] /Count ${pages.length} >>`;
+
+    pages.forEach((pageLines, index) => {
+      const pageId = pageObjectIds[index];
+      const contentId = contentObjectIds[index];
+      const stream = this.renderPdfPageStream(pageLines);
+      objects[pageId] =
+        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] ` +
+        `/Resources << /Font << /F1 ${regularFontId} 0 R /F2 ${boldFontId} 0 R /F3 ${monoFontId} 0 R >> >> ` +
+        `/Contents ${contentId} 0 R >>`;
+      objects[contentId] = `<< /Length ${Buffer.byteLength(
+        stream,
+        'latin1',
+      )} >>\nstream\n${stream}\nendstream`;
+    });
+
+    objects[regularFontId] =
+      '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>';
+    objects[boldFontId] =
+      '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>';
+    objects[monoFontId] =
+      '<< /Type /Font /Subtype /Type1 /BaseFont /Courier /Encoding /WinAnsiEncoding >>';
+
+    let pdf = '%PDF-1.4\n';
+    const offsets = [0];
+    for (let index = 1; index < objects.length; index += 1) {
+      offsets[index] = Buffer.byteLength(pdf, 'latin1');
+      pdf += `${index} 0 obj\n${objects[index]}\nendobj\n`;
+    }
+
+    const xrefOffset = Buffer.byteLength(pdf, 'latin1');
+    pdf += `xref\n0 ${objects.length}\n0000000000 65535 f \n`;
+    for (let index = 1; index < objects.length; index += 1) {
+      pdf += `${String(offsets[index]).padStart(10, '0')} 00000 n \n`;
+    }
+    pdf += `trailer\n<< /Size ${objects.length} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+
+    writeFileSync(filePath, Buffer.from(pdf, 'latin1'));
+  }
+
+  private renderPdfLines(
+    title: string,
+    content: string,
+  ): Array<{ text: string; style: 'title' | 'heading' | 'body' | 'code' }> {
+    const lines: Array<{ text: string; style: 'title' | 'heading' | 'body' | 'code' }> = [];
+    this.appendWrappedPdfLine(lines, this.pdfSafeText(title), 'title');
+    lines.push({ text: '', style: 'body' });
+
+    this.pdfSafeText(content)
+      .split('\n')
+      .forEach((rawLine) => {
+        const trimmed = rawLine.trimEnd();
+        if (!trimmed.trim()) {
+          lines.push({ text: '', style: 'body' });
+          return;
+        }
+
+        const heading = trimmed.match(/^#{1,6}\s+(.+)$/);
+        if (heading) {
+          this.appendWrappedPdfLine(lines, heading[1], 'heading');
+          return;
+        }
+
+        const isCode = trimmed.startsWith('    ') || trimmed.startsWith('```');
+        this.appendWrappedPdfLine(lines, trimmed.replace(/^```[a-z]*$/i, ''), isCode ? 'code' : 'body');
+      });
+
+    return lines.length ? lines : [{ text: 'Sin contenido para reportar.', style: 'body' }];
+  }
+
+  private appendWrappedPdfLine(
+    lines: Array<{ text: string; style: 'title' | 'heading' | 'body' | 'code' }>,
+    value: string,
+    style: 'title' | 'heading' | 'body' | 'code',
+  ): void {
+    const maxLength = style === 'title' ? 58 : style === 'heading' ? 76 : 98;
+    let remaining = value.trimEnd();
+    if (!remaining) {
+      lines.push({ text: '', style });
+      return;
+    }
+
+    while (remaining.length > maxLength) {
+      const slice = remaining.slice(0, maxLength);
+      const cutAt = Math.max(slice.lastIndexOf(' '), slice.lastIndexOf('/'));
+      const cut = cutAt > 35 ? cutAt : maxLength;
+      lines.push({ text: remaining.slice(0, cut).trimEnd(), style });
+      remaining = remaining.slice(cut).trimStart();
+    }
+    lines.push({ text: remaining, style });
+  }
+
+  private paginatePdfLines(
+    lines: Array<{ text: string; style: 'title' | 'heading' | 'body' | 'code' }>,
+  ): Array<Array<{ text: string; style: 'title' | 'heading' | 'body' | 'code' }>> {
+    const pages: Array<Array<{ text: string; style: 'title' | 'heading' | 'body' | 'code' }>> = [];
+    let currentPage: Array<{ text: string; style: 'title' | 'heading' | 'body' | 'code' }> = [];
+    let y = 744;
+
+    lines.forEach((line) => {
+      const height = this.pdfLineHeight(line.style);
+      if (y - height < 48 && currentPage.length) {
+        pages.push(currentPage);
+        currentPage = [];
+        y = 744;
+      }
+      currentPage.push(line);
+      y -= height;
+    });
+
+    if (currentPage.length) {
+      pages.push(currentPage);
+    }
+
+    return pages.length ? pages : [[{ text: 'Sin contenido para reportar.', style: 'body' }]];
+  }
+
+  private renderPdfPageStream(
+    lines: Array<{ text: string; style: 'title' | 'heading' | 'body' | 'code' }>,
+  ): string {
+    let y = 744;
+    return lines
+      .map((line) => {
+        const font = line.style === 'code' ? '/F3' : line.style === 'body' ? '/F1' : '/F2';
+        const size = line.style === 'title' ? 16 : line.style === 'heading' ? 12 : 10;
+        const statement = `BT ${font} ${size} Tf 50 ${y} Td (${this.pdfEscape(
+          line.text,
+        )}) Tj ET`;
+        y -= this.pdfLineHeight(line.style);
+        return statement;
+      })
+      .join('\n');
+  }
+
+  private pdfLineHeight(style: 'title' | 'heading' | 'body' | 'code'): number {
+    if (style === 'title') {
+      return 24;
+    }
+    if (style === 'heading') {
+      return 18;
+    }
+    return style === 'code' ? 13 : 14;
+  }
+
+  private pdfSafeText(value: string): string {
+    return value
+      .replace(/\r/g, '')
+      .replace(/[\u201c\u201d]/g, '"')
+      .replace(/[\u2018\u2019]/g, "'")
+      .replace(/[\u2013\u2014]/g, '-')
+      .replace(/\u2022/g, '-')
+      .replace(/\u2026/g, '...')
+      .replace(/[^\n\t\x20-\x7e\xa0-\xff]/g, '');
+  }
+
+  private pdfEscape(value: string): string {
+    return value.replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
   }
 
   private createId(prefix: string): string {

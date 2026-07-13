@@ -9,6 +9,7 @@ import {
   Res,
 } from '@nestjs/common';
 import type { Response } from 'express';
+import { readFileSync } from 'node:fs';
 import { AgentsService } from './agents.service';
 import { AGENT_KEYS, AgentKey } from './orchestrator.types';
 import type { CreateProjectInput, RunAgentInput } from './orchestrator.types';
@@ -97,7 +98,7 @@ export class OrchestratorController {
       throw new BadRequestException('Agente no soportado.');
     }
     const report = this.agentsService.getAgentReport(projectId, agentKey as AgentKey);
-    return response.download(report.path, report.fileName);
+    return this.sendPdf(response, report.path, report.fileName);
   }
 
   @Get('projects/:projectId/testing-report/download')
@@ -106,6 +107,18 @@ export class OrchestratorController {
     @Res() response: Response,
   ) {
     const reportPath = this.agentsService.getTestingReportPath(projectId);
-    return response.download(reportPath, 'testing-report.md');
+    return this.sendPdf(response, reportPath, 'testing-report.pdf');
+  }
+
+  private sendPdf(response: Response, filePath: string, fileName: string) {
+    const safeName = fileName.replace(/["\r\n]/g, '');
+    const buffer = readFileSync(filePath);
+    response.setHeader('Content-Type', 'application/pdf');
+    response.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(safeName)}`,
+    );
+    response.setHeader('Content-Length', buffer.length);
+    return response.send(buffer);
   }
 }

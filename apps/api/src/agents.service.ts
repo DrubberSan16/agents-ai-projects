@@ -143,7 +143,7 @@ export class AgentsService {
     if (!reportPath) {
       throw new BadRequestException('Aun no existe un reporte de testing.');
     }
-    return reportPath;
+    return this.store.saveTestingPdfReport(project, readFileSync(reportPath, 'utf8'));
   }
 
   getAgentReport(
@@ -155,8 +155,11 @@ export class AgentsService {
       const testingReport = this.store.getLatestTestingReportPath(project);
       if (testingReport) {
         return {
-          path: testingReport,
-          fileName: `${project.slug}-tester-report.md`,
+          path: this.store.saveTestingPdfReport(
+            project,
+            readFileSync(testingReport, 'utf8'),
+          ),
+          fileName: `${project.slug}-tester-report.pdf`,
         };
       }
     }
@@ -166,14 +169,15 @@ export class AgentsService {
       throw new BadRequestException('Aun no existe una salida generada para este agente.');
     }
 
-    const reportPath =
-      latestRun.reportPath && existsSync(latestRun.reportPath)
-        ? latestRun.reportPath
-        : this.store.saveAgentOutputReport(project, agentKey, latestRun.output);
+    const reportPath = this.store.saveAgentOutputPdfReport(
+      project,
+      agentKey,
+      latestRun.output,
+    );
 
     return {
       path: reportPath,
-      fileName: `${project.slug}-${agentKey}-report.md`,
+      fileName: `${project.slug}-${agentKey}-report.pdf`,
     };
   }
 
@@ -238,7 +242,7 @@ export class AgentsService {
 
     const aiResult = await this.ai.generate({
       system:
-        'Eres el Agente 1, consultor senior experto en levantamiento de informacion, arquitectura de software y analisis funcional. Generas un markdown tecnico, accionable y suficientemente descriptivo para que un desarrollador implemente el sistema sin volver a leer todo el proyecto.',
+        'Eres el Agente 1, consultor senior experto en levantamiento de informacion, arquitectura de software, analisis funcional y diseno de plataformas transaccionales. Generas un markdown tecnico, accionable y suficientemente descriptivo para que un desarrollador implemente el sistema sin volver a leer todo el proyecto. No aceptas fronts demostrativos: defines modulos, pantallas, tablas, formularios, acciones, permisos, reportes y flujos transaccionales esperados.',
       prompt: `Proyecto: ${project.name}
 Ruta: ${project.projectPath}
 Tipo objetivo: ${project.targetType}
@@ -267,10 +271,19 @@ Devuelve SOLO markdown con estas secciones obligatorias:
 4. Entidades y flujos
 5. Arquitectura tecnica ${project.mode === 'new' ? 'recomendada' : 'detectada y recomendada'}
 6. Stack de desarrollo sugerido
-7. Estructura de modulos y archivos esperados
-8. Diagramas Mermaid: arquitectura de componentes, flujo principal y modelo de datos
-9. Criterios tecnicos para el Agente 2
-10. Dudas o aprobaciones pendientes.
+7. Mapa transaccional de modulos: menu, pantallas, tablas, formularios, acciones CRUD, filtros, exportaciones y permisos por modulo
+8. Estructura de modulos y archivos esperados
+9. Contrato UI/API: endpoints, servicios frontend, vistas y criterios de navegacion obligatorios
+10. Diagramas Mermaid: arquitectura de componentes, flujo principal y modelo de datos
+11. Criterios tecnicos para el Agente 2
+12. Dudas o aprobaciones pendientes.
+
+Definicion de terminado transaccional:
+- Cada modulo solicitado debe aparecer en el menu principal o sidebar.
+- Cada modulo debe tener pantalla propia, listado o tabla, filtros, formulario de creacion, accion de edicion/cambio de estado y eliminacion o anulacion cuando aplique.
+- El frontend debe consumir APIs reales por modulo; no puede limitarse a cards, contadores o texto demostrativo.
+- Si el sistema es ERP, debe parecer una plataforma operativa con dashboard, navegacion lateral, estado operacional, modulos de inventario/compras/ventas/clientes/proveedores/usuarios/roles/reportes y flujos transaccionales.
+- El Agente 2 debe reescribir frontend o backend si la implementacion existente no cumple este contrato.
 
 Para proyectos nuevos, propone una arquitectura completa para ${project.targetType === 'executable' ? 'Java ejecutable empaquetable en JAR' : 'NestJS + Vue'} con capas, modulos, DTOs, servicios, persistencia, autenticacion, validaciones, testing y despliegue local.`,
       fallback: () => this.localAnalysis(project, prompt, scan, documents),
@@ -340,7 +353,7 @@ Para proyectos nuevos, propone una arquitectura completa para ${project.targetTy
     try {
       const aiResult = await this.ai.generate({
         system:
-          'Eres el Agente 2 desarrollador senior experto en implementacion full-stack tipo Codex. Lees reglas de negocio, inspeccionas archivos reales, comparas lo existente contra lo solicitado y produces una implementacion concreta: archivos, modulos, endpoints, UI, validaciones, pruebas y comandos. No te limites a un plan generico ni a documentacion.',
+          'Eres el Agente 2 desarrollador senior experto en implementacion full-stack tipo Codex y arquitectura de plataformas transaccionales. Actuas como programador senior dentro de un orquestador local que SI tiene acceso al filesystem del proyecto indicado y que aplicara cambios fisicos mediante scaffold. Nunca digas que no tienes acceso a la ruta local si el inventario tecnico fue entregado. Inspeccionas archivos reales, comparas backend y frontend, detectas brechas y programas una aplicacion funcional de extremo a extremo. No basta con exponer APIs ni escribir documentacion: cada modulo solicitado debe tener backend, servicio frontend, pantalla transaccional, listado/tabla, formulario CRUD, estados/acciones, validaciones, reporteria cuando aplique y navegacion visible para el usuario. Si el front actual es demostrativo, generico o no transaccional, debes reemplazarlo o reescribirlo.',
         prompt: `Proyecto: ${updatedProject.name}
 Tipo objetivo: ${targetType}
 
@@ -359,22 +372,38 @@ ${this.renderDocuments(documents)}
 Solicitud del usuario:
 ${requestedChange}
 
+Instruccion critica:
+No respondas que no tienes acceso al filesystem, que no puedes listar archivos, que no puedes ejecutar comandos reales o que solo dejas un paquete tecnico. Este orquestador local ya te entrego inventario y muestras reales, y luego aplicara el scaffold sobre la ruta fisica indicada. Tu salida debe guiar una implementacion real y auditable por archivos.
+
 Devuelve markdown con:
 1. Alcance implementado
 2. Ticket de ejecucion
 3. Arquitectura aplicada
 4. Archivos creados o modificados
-5. Logica de negocio implementada por modulo
-6. CRUD completo por entidad detectada
-7. Seguridad, usuarios, roles, validaciones y politicas iniciales
-8. Mantenedores o catalogos operativos
-9. Reporteria, dashboards, metricas y exportaciones
-10. Endpoints o pantallas disponibles
-11. Criterios de aceptacion
-12. Pruebas sugeridas
-13. Riesgos o pendientes.
+5. Brechas detectadas entre API y frontend
+6. Logica de negocio implementada por modulo
+7. CRUD completo por entidad detectada
+8. Pantallas transaccionales creadas por modulo
+9. Seguridad, usuarios, roles, validaciones y politicas iniciales
+10. Mantenedores o catalogos operativos
+11. Reporteria, dashboards, metricas y exportaciones
+12. Endpoints y rutas frontend disponibles
+13. Criterios de aceptacion
+14. Pruebas sugeridas
+15. Riesgos o pendientes.
 
-No generes modulos genericos vacios. Extrae entidades, reglas, flujos, validaciones y restricciones del analisis previo y materializalos en archivos concretos. Antes de decir que algo fue implementado, valida si el archivo existe en el inventario tecnico. Lo que no exista debe quedar en la lista de archivos generados/modificados por el scaffold. Si el proyecto es nuevo, genera una aplicacion funcional completa segun las reglas, no solo una estructura base. Si falta detalle, implementa una version inicial coherente y marca los pendientes como dudas.`,
+Reglas obligatorias de implementacion:
+- Reescribe frontend o backend cuando sea necesario; no conserves una pantalla vieja si impide cumplir el contrato transaccional.
+- No generes una pagina de documentacion, cards estaticos, contadores o listas genericas como resultado final.
+- El primer viewport autenticado debe ser una plataforma operativa: sidebar/menu, dashboard, modulos navegables, estado operacional, tablas y acciones.
+- Si existe una API de modulo sin pantalla, debes crear o modificar el frontend para transaccionar ese modulo.
+- Cada modulo solicitado debe aparecer en la navegacion visible del frontend, no solo como endpoint.
+- Cada modulo debe tener listado o tabla, filtros, crear, editar o cambiar estado, eliminar/anular cuando aplique y feedback de carga/error.
+- El frontend debe consumir las APIs reales del modulo, no datos hardcodeados salvo seed inicial del backend.
+- Para ERP, prioriza pantallas operativas para productos, categorias, almacenes, ubicaciones, inventario, movimientos, kardex, compras, ventas, clientes, proveedores, usuarios, roles y reportes.
+- No declares "implementado" un modulo si no existe evidencia en archivos backend y frontend.
+
+No generes modulos genericos vacios. Extrae entidades, reglas, flujos, validaciones y restricciones del analisis previo y materializalos en archivos concretos. Antes de decir que algo fue implementado, valida si el archivo existe en el inventario tecnico. Si el backend existe pero el frontend no permite transaccionar, esa brecha es critica y debes resolverla. Lo que no exista debe quedar en la lista de archivos generados/modificados por el scaffold. Si el proyecto es nuevo, genera una aplicacion funcional completa segun las reglas, no solo una estructura base. Si falta detalle, implementa una version inicial coherente y marca los pendientes como dudas.`,
         fallback: () => this.localDeveloperPlan(updatedProject, targetType, requestedChange, rules),
         timeoutMs: this.getDeveloperTimeoutMs(),
         images,
@@ -384,7 +413,7 @@ No generes modulos genericos vacios. Extrae entidades, reglas, flujos, validacio
         updatedProject,
         `Ejecucion ${new Date().toISOString().slice(0, 10)} - ${updatedProject.name}`,
         requestedChange,
-        aiResult.text,
+        this.normalizeDeveloperNarrative(aiResult.text, updatedProject.projectPath),
       );
       const scaffold = this.scaffolds.applyDevelopmentRequest(
         updatedProject,
@@ -393,7 +422,23 @@ No generes modulos genericos vacios. Extrae entidades, reglas, flujos, validacio
         rules,
         ticket.id,
       );
-      const output = `${aiResult.text}
+      const developerNarrative = this.normalizeDeveloperNarrative(
+        aiResult.text,
+        updatedProject.projectPath,
+      );
+      const output = `# Resultado real de ejecucion
+
+El orquestador local ejecuto el Agente 2 con acceso a la ruta:
+
+\`\`\`text
+${updatedProject.projectPath}
+\`\`\`
+
+No se acepta como resultado final una afirmacion de falta de acceso al filesystem cuando el scaffold genero o verifico archivos fisicos. La evidencia de ejecucion queda en la lista de archivos generados o verificados.
+
+## Respuesta tecnica del Agente 2
+
+${developerNarrative}
 
 ## Comparacion contra codigo existente
 
@@ -485,10 +530,14 @@ ${message}
       rules,
       snapshot.latestTicket?.summary ?? '',
     );
+    const transactionalAudit = this.renderTransactionalFrontendAudit(
+      scan,
+      this.extractDevelopmentModules(`${prompt}\n${rules}`),
+    );
 
     const aiResult = await this.ai.generate({
       system:
-        'Eres el Agente 3, QA lead senior experto en testing, seguridad, escalabilidad, arquitectura y operacion. Auditas el proyecto con criterio profesional. No ejecutas cambios; devuelves instrucciones priorizadas.',
+        'Eres el Agente 3, QA lead senior experto en testing, seguridad, escalabilidad, arquitectura, UX operativa y plataformas transaccionales. Auditas el proyecto con criterio profesional. No ejecutas cambios; devuelves instrucciones priorizadas. Debes marcar como hallazgo critico cualquier frontend demostrativo, generico o no transaccional.',
       prompt: `Proyecto: ${project.name}
 Tipo objetivo: ${project.targetType}
 
@@ -504,15 +553,18 @@ ${this.renderDocuments(documents)}
 Arbol resumido:
 ${scan.files.join('\n') || 'Sin archivos detectados.'}
 
+Auditoria transaccional del frontend:
+${transactionalAudit}
+
 Pedido adicional:
 ${prompt || 'Sin prompt adicional.'}
 
 Prompt sugerido para Agente 2:
 ${developerPrompt}
 
-Devuelve un reporte markdown con: Resumen, Hallazgos criticos, Seguridad, Escalabilidad, Arquitectura sugerida, Pruebas recomendadas, Checklist para Agente 2, Prompt completo para Agente 2.
+Devuelve un reporte markdown con: Resumen, Hallazgos criticos, Frontend transaccional, Seguridad, Escalabilidad, Arquitectura sugerida, Pruebas recomendadas, Checklist para Agente 2, Prompt completo para Agente 2.
 
-En la seccion "Prompt completo para Agente 2", incluye un bloque \`\`\`text con el prompt completo y listo para copiar. Debe contener objetivo, contexto, hallazgos, archivos/modulos a tocar, criterios de aceptacion y pruebas esperadas.`,
+En la seccion "Prompt completo para Agente 2", incluye un bloque \`\`\`text con el prompt completo y listo para copiar. Debe contener objetivo, contexto, hallazgos, archivos/modulos a tocar, criterio obligatorio de reescritura de frontend si es demo/no transaccional, criterios de aceptacion y pruebas esperadas.`,
       fallback: () => this.localTestingReport(project, prompt, scan, rules),
       images,
     });
@@ -541,6 +593,62 @@ En la seccion "Prompt completo para Agente 2", incluye un bloque \`\`\`text con 
         : project;
     const runId = this.store.createRun(updatedProject, 'deployment', prompt);
     try {
+      if (targetType === 'web') {
+        const scan = this.scanProject(updatedProject.projectPath, { deep: true });
+        const findings = this.getTransactionalFrontendFindings(
+          scan,
+          this.extractDevelopmentModules(`${prompt}\n${this.store.readBusinessRules(updatedProject)}`),
+        );
+        const criticalFindings = findings.filter((finding) =>
+          finding.startsWith('CRITICO:'),
+        );
+
+        if (criticalFindings.length) {
+          const developerPrompt = `Reescribe o completa el frontend y backend para cumplir el contrato transaccional antes del despliegue.
+
+Hallazgos bloqueantes:
+${criticalFindings.map((finding) => `- ${finding}`).join('\n')}
+
+Criterios obligatorios:
+- Sidebar/menu operativo por modulo.
+- Dashboard ejecutivo con metricas reales.
+- Pantalla transaccional por cada modulo solicitado.
+- Tabla o listado con filtros.
+- Formulario de creacion.
+- Accion de edicion o cambio de estado.
+- Accion de eliminacion/anulacion cuando aplique.
+- Servicios frontend consumiendo APIs reales por modulo.
+- Reescribir App.vue, servicios, vistas y backend si la implementacion actual es demostrativa.`;
+          const output = `# Despliegue bloqueado por validacion transaccional
+
+El Agente 4 no levantara la aplicacion como finalizada porque el frontend aun no cumple el contrato minimo de plataforma transaccional.
+
+## Hallazgos
+
+${criticalFindings.map((finding) => `- ${finding}`).join('\n')}
+
+## Prompt para aprobar en Agente 2
+
+\`\`\`text
+${developerPrompt}
+\`\`\`
+`;
+
+          this.store.addNotification(
+            updatedProject,
+            'developer',
+            developerPrompt,
+            'approval',
+          );
+          this.store.finishRun(updatedProject, runId, 'deployment', 'Sugiriendo', output);
+
+          return {
+            project: this.store.getProjectSnapshot(updatedProject.id),
+            output,
+          };
+        }
+      }
+
       const deployment = await this.deployments.deploy(updatedProject, targetType);
       const savedDeployment = this.store.saveDeployment(updatedProject, deployment);
       const output = `# Despliegue
@@ -760,6 +868,31 @@ ${message}
     );
   }
 
+  private normalizeDeveloperNarrative(text: string, projectPath: string): string {
+    const normalized = this.normalizeText(text);
+    const deniesAccess =
+      normalized.includes('no tengo acceso directo al filesystem') ||
+      normalized.includes('no puedo ejecutar comandos reales') ||
+      normalized.includes('no puedo modificar archivos fisicamente') ||
+      normalized.includes('no declaro implementado ningun cambio en disco');
+
+    if (!deniesAccess) {
+      return text;
+    }
+
+    return `# Ejecucion corregida del Agente desarrollador
+
+El modelo produjo una respuesta conservadora indicando falta de acceso al filesystem. Esa afirmacion no aplica en este orquestador local.
+
+Ruta disponible para ejecucion:
+
+\`\`\`text
+${projectPath}
+\`\`\`
+
+El Agente 2 debe continuar como programador senior full-stack: revisar backend y frontend, detectar brechas API/UI, generar o modificar archivos reales mediante el scaffold local y reportar solo lo que quede respaldado por archivos generados o verificados.`;
+  }
+
   private buildDevelopmentGap(
     project: ProjectRecord,
     targetType: ProjectTarget,
@@ -801,6 +934,8 @@ ${message}
               `apps/api/src/domain/${module}/${module}.controller.ts`,
               `apps/api/src/domain/${module}/${module}.service.ts`,
               `apps/api/src/domain/${module}/${module}.types.ts`,
+              `apps/web/src/modules/${module}/${module}.vue`,
+              `apps/web/src/services/${module}.service.ts`,
             ]),
           ];
 
@@ -809,6 +944,22 @@ ${message}
     const controllers = scan.files.filter((file) => file.endsWith('.controller.ts'));
     const services = scan.files.filter((file) => file.endsWith('.service.ts'));
     const views = scan.files.filter((file) => file.endsWith('.vue') || file.endsWith('.tsx'));
+    const backendModules = modules.filter((module) =>
+      files.has(`apps/api/src/domain/${module}/${module}.controller.ts`),
+    );
+    const frontendModules = modules.filter(
+      (module) =>
+        files.has(`apps/web/src/modules/${module}/${module}.vue`) ||
+        scan.samples.some(
+          (sample) =>
+            sample.path === 'apps/web/src/App.vue' &&
+            sample.content.toLowerCase().includes(module.replace(/-/g, ' ')),
+        ),
+    );
+    const apiWithoutFrontend = backendModules.filter(
+      (module) => !frontendModules.includes(module),
+    );
+    const transactionalAudit = this.renderTransactionalFrontendAudit(scan, modules);
 
     return `### Inventario de implementacion
 
@@ -817,10 +968,20 @@ ${message}
 - Controladores existentes: ${controllers.length ? controllers.slice(0, 20).join(', ') : 'ninguno'}.
 - Servicios existentes: ${services.length ? services.slice(0, 20).join(', ') : 'ninguno'}.
 - Vistas existentes: ${views.length ? views.slice(0, 20).join(', ') : 'ninguna'}.
+- Modulos con backend detectado: ${backendModules.length ? backendModules.join(', ') : 'ninguno'}.
+- Modulos con frontend transaccional detectado: ${frontendModules.length ? frontendModules.join(', ') : 'ninguno'}.
 
 ### Modulos de negocio inferidos
 
 ${modules.map((module) => `- ${module}`).join('\n') || '- business-records'}
+
+### Brechas criticas API vs Frontend
+
+${apiWithoutFrontend.length ? apiWithoutFrontend.map((module) => `- ${module}: API detectada sin pantalla transaccional dedicada. El Agente 2 debe crear vista, servicio HTTP, formulario CRUD, listado y navegacion.`).join('\n') : '- No se detectaron APIs sin frontend para los modulos inferidos.'}
+
+### Auditoria transaccional del frontend
+
+${transactionalAudit}
 
 ### Archivos esperados ya existentes
 
@@ -832,7 +993,92 @@ ${missing.map((file) => `- ${file}`).join('\n') || '- No se detectan archivos es
 
 ### Regla operativa
 
-El Agente 2 no debe declarar una API, pantalla, CRUD o modulo como implementado si no aparece en archivos reales generados o modificados. Si falta, debe crearlo o actualizar el scaffold para materializarlo.`;
+El Agente 2 no debe declarar una API, pantalla, CRUD o modulo como implementado si no aparece en archivos reales generados o modificados. Exponer una API no es suficiente: el frontend debe permitir transaccionar cada modulo solicitado. Si falta, debe crearlo o actualizar el scaffold para materializarlo.`;
+  }
+
+  private renderTransactionalFrontendAudit(
+    scan: ProjectScan,
+    modules: string[],
+  ): string {
+    const findings = this.getTransactionalFrontendFindings(scan, modules);
+    return findings.map((finding) => `- ${finding}`).join('\n');
+  }
+
+  private getTransactionalFrontendFindings(
+    scan: ProjectScan,
+    modules: string[],
+  ): string[] {
+    const files = new Set(scan.files.map((file) => file.replace(/\\/g, '/')));
+    const app = scan.samples.find((sample) => sample.path === 'apps/web/src/App.vue');
+    const appContent = app?.content ?? '';
+    const normalizedApp = this.normalizeText(appContent);
+    const moduleViews = scan.files.filter((file) =>
+      /^apps\/web\/src\/modules\/.+\/.+\.(vue|tsx)$/.test(file.replace(/\\/g, '/')),
+    );
+    const moduleServices = scan.files.filter((file) =>
+      /^apps\/web\/src\/services\/.+\.service\.ts$/.test(file.replace(/\\/g, '/')),
+    );
+    const hasSidebar = /sidebar|side-nav|nav-menu|menu transaccional|erp-layout/i.test(appContent);
+    const hasModuleImports = /src\/modules|\.\/modules\//i.test(appContent);
+    const hasActions =
+      /editar|eliminar|guardar|actualizar|crear|@click=.*remove|@click=.*update|method:\s*'PUT'|method:\s*'DELETE'/i.test(
+        appContent,
+      ) ||
+      scan.samples.some((sample) =>
+        /editar|eliminar|guardar|actualizar|crear|method:\s*'PUT'|method:\s*'DELETE'/i.test(
+          sample.content,
+        ),
+      );
+    const hasForm = /<form|v-model=/i.test(appContent) || scan.samples.some((sample) => /<form|v-model=/i.test(sample.content));
+    const hasApiConsumption =
+      /fetch\('\/api|fetch\(\"\/api|VITE_API_URL|request<|axios/i.test(appContent) ||
+      scan.samples.some((sample) => /fetch\('\/api|fetch\(\"\/api|VITE_API_URL|request<|axios/i.test(sample.content));
+    const hasTablesOrRows =
+      /<table|<thead|<tbody|record-card|module-table|data-table/i.test(appContent) ||
+      scan.samples.some((sample) => /<table|<thead|<tbody|record-card|module-table|data-table/i.test(sample.content));
+    const hasGenericDemo =
+      /modulos erp operativos|nuevo registro del modulo|\{\{\s*module\.name\s*\}\}\s*-\s*\{\{\s*module\.totalRecords/i.test(
+        normalizedApp,
+      );
+    const missingModuleScreens = modules.filter(
+      (module) => !files.has(`apps/web/src/modules/${module}/${module}.vue`),
+    );
+    const findings: string[] = [];
+
+    if (!app) {
+      findings.push('CRITICO: no se encontro apps/web/src/App.vue para validar la experiencia transaccional.');
+    }
+    if (!hasSidebar) {
+      findings.push('CRITICO: el frontend no evidencia sidebar/menu operativo por modulos como una plataforma real.');
+    }
+    if (!hasModuleImports || moduleViews.length === 0) {
+      findings.push('CRITICO: el frontend no importa ni monta vistas reales por modulo desde apps/web/src/modules.');
+    }
+    if (missingModuleScreens.length) {
+      findings.push(
+        `CRITICO: faltan pantallas transaccionales para: ${missingModuleScreens.join(', ')}.`,
+      );
+    }
+    if (!hasApiConsumption || moduleServices.length === 0) {
+      findings.push('CRITICO: no se detectan servicios frontend consumiendo APIs reales por modulo.');
+    }
+    if (!hasForm || !hasActions || !hasTablesOrRows) {
+      findings.push(
+        'CRITICO: la UI no evidencia CRUD completo visible: listado/tabla, formulario, crear, actualizar/cambiar estado y eliminar.',
+      );
+    }
+    if (hasGenericDemo) {
+      findings.push(
+        'CRITICO: se detecto UI generica o demostrativa. Debe reemplazarse por shell transaccional con sidebar, dashboard y pantallas reales por modulo.',
+      );
+    }
+    if (!findings.length) {
+      findings.push(
+        'OK: se detectan señales minimas de frontend transaccional con navegacion, vistas por modulo, servicios API y acciones CRUD.',
+      );
+    }
+
+    return findings;
   }
 
   private extractDevelopmentModules(source: string): string[] {
@@ -865,7 +1111,7 @@ El Agente 2 no debe declarar una API, pantalla, CRUD o modulo como implementado 
       .filter(([term]) => normalized.includes(term))
       .map(([, slug]) => slug);
 
-    return Array.from(new Set(detected)).slice(0, 10);
+    return Array.from(new Set(detected)).slice(0, 18);
   }
 
   private inferDeveloperRequest(project: ProjectRecord, rules: string): string {
@@ -1238,6 +1484,8 @@ ${prompt || this.renderDocumentBusinessContent(documents) || 'Pendiente: agrega 
 - Los cambios deben registrar ticket de ejecucion.
 - Las dudas se convierten en notificaciones de aprobacion.
 - Cada modulo debe tener validaciones, manejo de errores, pruebas minimas y trazabilidad.
+- Cada modulo debe tener pantalla transaccional propia con menu visible, tabla/listado, filtros, formulario, acciones de editar/cambiar estado y eliminar/anular cuando aplique.
+- El frontend no puede quedarse en cards demostrativos, contadores o listas genericas de modulos.
 - La autenticacion inicial debe permitir cambio posterior de usuario, nombre y contrasena.
 
 ## Entidades y flujos
@@ -1264,6 +1512,7 @@ ${project.targetType === 'executable' ? `Para ejecutable Java, usar Spring Boot 
 
 - API NestJS: modulos por dominio, controladores REST, servicios de aplicacion, DTOs y validadores.
 - UI Vue: vistas por flujo de negocio, composables para consumo de API y estado local claro.
+- UI transaccional: sidebar/menu por modulo, dashboard operativo, tablas, filtros, formularios, estados de carga/error, acciones por fila y consumo real de endpoints.
 - Persistencia: iniciar con almacenamiento simple o SQLite, dejando contratos preparados para migrar a PostgreSQL.
 - Seguridad: autenticacion, gestion de usuario inicial, hashing, validacion de DTOs, CORS controlado y limites de payload.
 - Testing: unitarias de servicios, integracion de endpoints y flujo E2E de login + flujo principal.`}
@@ -1290,6 +1539,8 @@ ${project.targetType === 'executable' ? `- pom.xml
 - apps/api/src/business.service.ts
 - apps/api/src/business.types.ts
 - apps/web/src/App.vue
+- apps/web/src/modules/<modulo>/<modulo>.vue
+- apps/web/src/services/<modulo>.service.ts
 - apps/web/src/style.css
 - docs/architecture.md`}
 
@@ -1376,7 +1627,11 @@ Se creara un ticket en la memoria SQLite del proyecto y un archivo markdown en .
 
 - Leer reglas de negocio antes de tocar codigo.
 - Generar o actualizar una aplicacion funcional si el proyecto es nuevo.
-- Materializar reglas de negocio en controladores, servicios, DTOs, UI y documentacion.
+- Reescribir el frontend o backend si lo existente es generico, demostrativo o no permite transaccionar modulos.
+- Revisar backend y frontend antes de declarar avances.
+- Materializar reglas de negocio en controladores, servicios, DTOs, servicios HTTP frontend, pantallas transaccionales, formularios, listados y navegacion.
+- Si una API ya existe pero no hay UI para transaccionarla, crear la pantalla, el servicio frontend y la ruta/menu correspondiente.
+- Para ERP, cada modulo solicitado debe poder operarse desde la interfaz: productos, categorias, almacenes, ubicaciones, inventario, movimientos, kardex, compras, ventas, clientes, proveedores, usuarios, roles y reportes.
 - Mantener archivos existentes sin sobrescritura automatica cuando el proyecto no fue creado por el orquestador.
 
 ## Archivos esperados
@@ -1384,13 +1639,19 @@ Se creara un ticket en la memoria SQLite del proyecto y un archivo markdown en .
 - business-rules.md
 - ticket de ejecucion
 - ${targetType === 'executable' ? 'API Java/Spring Boot con endpoints de negocio y empaquetado JAR' : 'API NestJS con modulo de negocio y UI Vue operativa'}
+- servicios frontend por modulo
+- pantallas transaccionales por modulo solicitado con tabla/listado, filtros, formulario, editar/cambiar estado y eliminar/anular
+- navegacion visible para cada modulo en sidebar/menu principal
+- dashboard operativo tipo plataforma real, no cards demostrativos
 - documentacion tecnica con diagramas y criterios de aceptacion
 
 ## Criterios de aceptacion
 
 - El proyecto conserva memoria por SQLite propio.
 - El cambio queda trazado en ticket.
-- La aplicacion generada incluye flujo autenticado, modulo de negocio y comandos de ejecucion.
+- La aplicacion generada incluye flujo autenticado, modulos de negocio operables desde frontend y comandos de ejecucion.
+- Ningun modulo debe quedar solo como endpoint sin pantalla transaccional.
+- No debe quedar un front con datos demostrativos, listas genericas o pantalla de documentacion.
 - El siguiente paso puede ser auditado por el Agente 3.
 
 ## Riesgos
@@ -1417,12 +1678,14 @@ ${rules ? '- Reglas cargadas parcialmente; revisar dudas abiertas.' : '- Falta l
       'Entidades y flujos',
       'Logica de negocio',
     ]).slice(0, 12);
+    const modules = this.extractDevelopmentModules(`${prompt}\n${rules}`);
+    const transactionalAudit = this.renderTransactionalFrontendAudit(scan, modules);
     const files = scan.files.slice(0, 80).join('\n');
 
-    return `Actua como Agente 2 desarrollador tipo Codex para el proyecto "${project.name}".
+return `Actua como Agente 2 desarrollador tipo Codex para el proyecto "${project.name}".
 
 Objetivo:
-Implementa los ajustes detectados por el Agente 3 de testing y deja el proyecto en una version mas segura, mantenible y funcional. No generes solo documentacion: modifica o genera los archivos necesarios.
+Implementa los ajustes detectados por el Agente 3 de testing y deja el proyecto en una version mas segura, mantenible y funcional. Actua como programador senior full-stack. No generes solo documentacion: modifica o genera backend, servicios frontend, pantallas, formularios, listados/tablas, navegacion, validaciones y pruebas. Si el frontend actual es demostrativo o no transaccional, reescribelo.
 
 Contexto del proyecto:
 - Tipo objetivo: ${project.targetType}
@@ -1438,10 +1701,16 @@ ${architectureContext.map((item) => `- ${item}`).join('\n') || '- Mantener arqui
 Ultimo ticket de desarrollo:
 ${latestTicketSummary || 'Sin ticket previo disponible.'}
 
+Auditoria transaccional actual:
+${transactionalAudit}
+
 Hallazgos que debes corregir:
+- Reemplazar cualquier pantalla generica tipo cards/contadores/lista de modulos por una shell transaccional con sidebar, dashboard, tablas, formularios y acciones reales.
 - Completar validaciones de DTOs y reglas de negocio por modulo.
 - Fortalecer seguridad: usuarios, roles, contrasenas, CORS, secretos por ambiente y manejo de errores.
 - Agregar CRUD completo para cada modulo solicitado por el usuario, no solo modulos transversales.
+- Verificar que cada modulo expuesto por API tenga una pantalla frontend transaccional.
+- Si hay backend sin frontend, crear componentes/vistas/servicios frontend y enlazarlos en la navegacion.
 - Agregar reporteria operacional, dashboards, exportaciones y filtros utiles.
 - Agregar mantenedores/catalogos necesarios para estados, prioridades, categorias y roles.
 - Agregar pruebas unitarias o de integracion para servicios y endpoints principales.
@@ -1454,7 +1723,10 @@ Criterios de aceptacion:
 - El proyecto compila sin errores.
 - El Agente 2 crea o actualiza archivos concretos.
 - Cada modulo propio del negocio tiene CRUD, validaciones, estados y reglas aplicadas.
-- Seguridad, mantenedores y reporteria quedan conectados a la UI o endpoints.
+- Cada modulo propio del negocio tiene pantalla transaccional visible en frontend.
+- El frontend autenticado se parece a una plataforma operativa real: menu lateral, dashboard, secciones por modulo, tablas, filtros, formularios, acciones y estados de carga/error.
+- No quedan textos o flujos de demo como "Proyecto ERP", "Modulos ERP operativos" o "Nuevo registro del modulo" si no abren pantallas transaccionales reales.
+- Seguridad, mantenedores y reporteria quedan conectados a la UI y a endpoints reales.
 - El reporte final lista archivos modificados y comandos para verificar.
 
 Pruebas esperadas:
@@ -1488,6 +1760,7 @@ Auditoria local generada sobre ${scan.files.length} archivos detectados.
 - Validar autenticacion real antes de exponer el proyecto.
 - Evitar guardar secretos en repositorio; usar variables de entorno.
 - Agregar pruebas automatizadas sobre reglas de negocio principales.
+- Si el frontend muestra cards, contadores o modulos genericos sin pantallas transaccionales, debe considerarse bloqueo critico y volver al Agente 2.
 
 ## Seguridad
 
@@ -1503,13 +1776,14 @@ Auditoria local generada sobre ${scan.files.length} archivos detectados.
 
 ## Arquitectura sugerida
 
-${project.targetType === 'executable' ? '- Para Java, empaquetar jar reproducible y externalizar configuracion.' : '- Para web, mantener API NestJS separada de UI Vue y compartir contratos por DTOs.'}
+${project.targetType === 'executable' ? '- Para Java, empaquetar jar reproducible y externalizar configuracion.' : '- Para web, mantener API NestJS separada de UI Vue y compartir contratos por DTOs. La UI debe ser una plataforma transaccional con sidebar, dashboard, vistas por modulo, tablas, filtros, formularios y acciones por fila.'}
 
 ## Pruebas recomendadas
 
 - Unitarias para reglas de negocio.
 - Integracion para endpoints criticos.
 - E2E minimo de login y flujo principal.
+- E2E de cada modulo solicitado: abrir desde menu, listar, crear, editar/cambiar estado, eliminar/anular y ver reporte.
 
 ## Checklist para Agente 2
 

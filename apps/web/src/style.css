@@ -938,6 +938,36 @@ h2 {
   color: inherit;
 }
 
+.code-block {
+  position: relative;
+  margin: 12px 0;
+}
+
+.code-block pre {
+  margin: 0;
+  padding-top: 38px;
+}
+
+.copy-code {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
+  min-height: 26px;
+  padding: 4px 9px;
+  border: 1px solid rgba(238, 247, 242, 0.22);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.08);
+  color: #eef7f2;
+  font-size: 11px;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.copy-code:hover {
+  background: rgba(255, 255, 255, 0.16);
+}
+
 .empty-state {
   min-height: 280px;
   display: grid;

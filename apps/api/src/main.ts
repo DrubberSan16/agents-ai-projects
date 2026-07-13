@@ -10,6 +10,7 @@ async function bootstrap() {
   app.enableCors({
     origin: true,
     credentials: true,
+    exposedHeaders: ['Content-Disposition', 'Content-Length'],
   });
   const server = await app.listen(process.env.PORT ?? 3000);
   const serverTimeoutMs = Number(

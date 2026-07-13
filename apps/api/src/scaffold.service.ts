@@ -954,6 +954,239 @@ export class ${module.className}Controller {
 `,
         ),
       );
+
+      files.push(
+        this.writeGenerated(
+          join(project.projectPath, `apps/web/src/services/${module.slug}.service.ts`),
+          `export type ${module.className}Status = 'Pendiente' | 'En proceso' | 'Aprobado' | 'Cerrado' | 'Bloqueado';
+export type ${module.className}Priority = 'Baja' | 'Media' | 'Alta' | 'Critica';
+
+export interface ${module.className}Record {
+  id: string;
+  code: string;
+  name: string;
+  description: string;
+  status: ${module.className}Status;
+  priority: ${module.className}Priority;
+  owner: string;
+  businessData: Record<string, string | number | boolean>;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ${module.className}Input {
+  code?: string;
+  name?: string;
+  description?: string;
+  priority?: ${module.className}Priority;
+  owner?: string;
+  businessData?: Record<string, string | number | boolean>;
+}
+
+const BASE_URL = '/api/domain/${module.slug}';
+
+async function request<T>(path = '', init: RequestInit = {}): Promise<T> {
+  const headers = new Headers(init.headers);
+  if (init.body && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+  const response = await fetch(\`\${BASE_URL}\${path}\`, { ...init, headers });
+  if (!response.ok) {
+    throw new Error(await response.text() || response.statusText);
+  }
+  return response.json() as Promise<T>;
+}
+
+export const ${this.toCamelCase(module.className)}Service = {
+  list(search = '') {
+    const query = search ? \`?search=\${encodeURIComponent(search)}\` : '';
+    return request<${module.className}Record[]>(query);
+  },
+  dashboard() {
+    return request<{ module: string; total: number; pending: number; closed: number; rules: string[] }>('/dashboard');
+  },
+  create(input: ${module.className}Input) {
+    return request<${module.className}Record>('', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    });
+  },
+  update(id: string, input: Partial<${module.className}Input> & { status?: ${module.className}Status }) {
+    return request<${module.className}Record>(\`/\${id}\`, {
+      method: 'PUT',
+      body: JSON.stringify(input),
+    });
+  },
+  remove(id: string) {
+    return request<{ deleted: boolean }>(\`/\${id}\`, { method: 'DELETE' });
+  },
+};
+`,
+        ),
+      );
+
+      files.push(
+        this.writeGenerated(
+          join(project.projectPath, `apps/web/src/modules/${module.slug}/${module.slug}.vue`),
+          `<script setup lang="ts">
+import { onMounted, reactive, ref } from 'vue';
+import {
+  ${this.toCamelCase(module.className)}Service,
+  type ${module.className}Priority,
+  type ${module.className}Record,
+  type ${module.className}Status,
+} from '../../services/${module.slug}.service';
+
+const loading = ref(false);
+const error = ref('');
+const search = ref('');
+const records = ref<${module.className}Record[]>([]);
+const dashboard = ref<{ module: string; total: number; pending: number; closed: number; rules: string[] } | null>(null);
+const form = reactive({
+  code: '',
+  name: '',
+  description: '',
+  priority: 'Media' as ${module.className}Priority,
+  owner: 'admin',
+});
+
+onMounted(() => {
+  void load();
+});
+
+async function load() {
+  loading.value = true;
+  error.value = '';
+  try {
+    const [items, metrics] = await Promise.all([
+      ${this.toCamelCase(module.className)}Service.list(search.value),
+      ${this.toCamelCase(module.className)}Service.dashboard(),
+    ]);
+    records.value = items;
+    dashboard.value = metrics;
+  } catch (err) {
+    error.value = err instanceof Error ? err.message : 'No se pudo cargar ${this.escapeTsString(module.name)}';
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function createRecord() {
+  const created = await ${this.toCamelCase(module.className)}Service.create(form);
+  records.value = [created, ...records.value];
+  form.code = '';
+  form.name = '';
+  form.description = '';
+  form.priority = 'Media';
+  await load();
+}
+
+async function updateStatus(record: ${module.className}Record, status: ${module.className}Status) {
+  const updated = await ${this.toCamelCase(module.className)}Service.update(record.id, { status });
+  records.value = records.value.map((item) => (item.id === updated.id ? updated : item));
+  await load();
+}
+
+async function removeRecord(record: ${module.className}Record) {
+  await ${this.toCamelCase(module.className)}Service.remove(record.id);
+  records.value = records.value.filter((item) => item.id !== record.id);
+  await load();
+}
+</script>
+
+<template>
+  <section class="module-page">
+    <header class="module-head">
+      <div>
+        <p class="eyebrow">Modulo transaccional</p>
+        <h2>${module.name}</h2>
+      </div>
+      <div class="module-actions">
+        <input v-model="search" placeholder="Buscar por codigo, nombre o descripcion" @keyup.enter="load" />
+        <button type="button" @click="load">{{ loading ? 'Actualizando...' : 'Actualizar' }}</button>
+      </div>
+    </header>
+
+    <p v-if="error" class="module-error">{{ error }}</p>
+
+    <section class="module-summary">
+      <article><span>Total</span><strong>{{ dashboard?.total ?? records.length }}</strong></article>
+      <article><span>Pendientes</span><strong>{{ dashboard?.pending ?? 0 }}</strong></article>
+      <article><span>Cerrados</span><strong>{{ dashboard?.closed ?? 0 }}</strong></article>
+    </section>
+
+    <section class="module-grid">
+      <article class="panel">
+        <h3>Nuevo registro</h3>
+        <form class="record-form" @submit.prevent="createRecord">
+          <label>Codigo<input v-model="form.code" /></label>
+          <label>Nombre<input v-model="form.name" required /></label>
+          <label>Descripcion<textarea v-model="form.description" rows="4" /></label>
+          <label>
+            Prioridad
+            <select v-model="form.priority">
+              <option>Baja</option>
+              <option>Media</option>
+              <option>Alta</option>
+              <option>Critica</option>
+            </select>
+          </label>
+          <label>Responsable<input v-model="form.owner" /></label>
+          <button type="submit">Crear ${module.name}</button>
+        </form>
+      </article>
+
+      <article class="panel">
+        <h3>Reglas aplicadas</h3>
+        <ul>
+          <li v-for="rule in dashboard?.rules" :key="rule">{{ rule }}</li>
+        </ul>
+      </article>
+    </section>
+
+    <section class="wide-panel">
+      <h3>Registros transaccionales</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Codigo</th>
+            <th>Nombre</th>
+            <th>Responsable</th>
+            <th>Prioridad</th>
+            <th>Estado</th>
+            <th>Acciones</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="record in records" :key="record.id">
+            <td>{{ record.code }}</td>
+            <td>
+              <strong>{{ record.name }}</strong>
+              <span>{{ record.description }}</span>
+            </td>
+            <td>{{ record.owner }}</td>
+            <td><small :class="record.priority.toLowerCase()">{{ record.priority }}</small></td>
+            <td>
+              <select :value="record.status" @change="updateStatus(record, ($event.target as HTMLSelectElement).value as ${module.className}Status)">
+                <option>Pendiente</option>
+                <option>En proceso</option>
+                <option>Aprobado</option>
+                <option>Cerrado</option>
+                <option>Bloqueado</option>
+              </select>
+            </td>
+            <td>
+              <button type="button" @click="removeRecord(record)">Eliminar</button>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </section>
+  </section>
+</template>
+`,
+        ),
+      );
     }
 
     files.push(
@@ -2423,9 +2656,23 @@ button {
       ),
     );
 
+    files.push(
+      this.writeGenerated(
+        join(project.projectPath, 'apps/web/src/App.vue'),
+        this.renderTransactionalAppVue(project, context),
+      ),
+    );
+
+    files.push(
+      this.writeGenerated(
+        join(project.projectPath, 'apps/web/src/style.css'),
+        this.renderTransactionalStyleCss(),
+      ),
+    );
+
     return {
       summary:
-        `Se genero una aplicacion web funcional con API NestJS, UI Vue, CRUD completo para ${context.primaryEntity}, modulos fisicos por dominio (${context.featureModules.map((module) => module.name).join(', ')}), mantenedores, reporteria, seguridad inicial y documentacion tecnica.`,
+        `Se genero una plataforma web transaccional con API NestJS, shell Vue tipo panel operativo, CRUD completo para ${context.primaryEntity}, vistas reales por modulo (${context.featureModules.map((module) => module.name).join(', ')}), mantenedores, reporteria, seguridad inicial y documentacion tecnica. La UI final no usa listas demostrativas de modulos: cada modulo abre una pantalla transaccional conectada a su API.`,
       files,
       commands: ['npm install', 'npm run dev'],
     };
@@ -2740,6 +2987,928 @@ java -jar target/${project.slug}-0.1.0.jar
     };
   }
 
+  private renderTransactionalAppVue(
+    project: ProjectRecord,
+    context: BusinessContext,
+  ): string {
+    const firstModule = context.featureModules[0];
+    const moduleImports = context.featureModules
+      .map(
+        (module) =>
+          `import ${module.className}ModuleView from './modules/${module.slug}/${module.slug}.vue';`,
+      )
+      .join('\n');
+    const moduleComponentMap = context.featureModules
+      .map((module) => `  ${JSON.stringify(module.slug)}: ${module.className}ModuleView`)
+      .join(',\n');
+
+    return `<script setup lang="ts">
+import { computed, onMounted, ref } from 'vue';
+${moduleImports}
+
+type ActiveArea = 'dashboard' | 'module' | 'mantenedores' | 'reporteria' | 'seguridad';
+
+interface BusinessRule {
+  id: string;
+  description: string;
+  required: boolean;
+}
+
+interface BusinessSummary {
+  project: string;
+  domain: string;
+  description: string;
+  entities: string[];
+  rules: BusinessRule[];
+  metrics: {
+    totalRecords: number;
+    completedRecords: number;
+    pendingRecords: number;
+    blockedRecords: number;
+    rulesCompliance: number;
+  };
+}
+
+interface ApplicationModule {
+  name: string;
+  slug: string;
+  description: string;
+  rules: string[];
+  totalRecords: number;
+}
+
+interface MaintainerItem {
+  id: string;
+  type: 'estado' | 'prioridad' | 'categoria' | 'rol';
+  label: string;
+  active: boolean;
+}
+
+interface OperationalReport {
+  generatedAt: string;
+  dashboard: BusinessSummary['metrics'];
+  activeMaintainers: number;
+  recommendations: string[];
+}
+
+interface UserAccount {
+  id: string;
+  username: string;
+  displayName: string;
+  role: 'Administrador' | 'Operador' | 'Auditor';
+  active: boolean;
+}
+
+interface SecurityPolicy {
+  passwordMinLength: number;
+  requireRotation: boolean;
+  roles: string[];
+  notes: string[];
+}
+
+const moduleComponents = {
+${moduleComponentMap}
+} as const;
+
+const username = ref('admin');
+const password = ref('Admin123!');
+const authenticated = ref(false);
+const authMessage = ref('');
+const loading = ref(false);
+const activeArea = ref<ActiveArea>('dashboard');
+const activeModuleSlug = ref('${firstModule?.slug ?? ''}');
+const summary = ref<BusinessSummary | null>(null);
+const modules = ref<ApplicationModule[]>(${JSON.stringify(
+      context.featureModules.map((module) => ({
+        name: module.name,
+        slug: module.slug,
+        description: module.description,
+        rules: module.rules,
+        totalRecords: 0,
+      })),
+      null,
+      2,
+    )});
+const maintainers = ref<MaintainerItem[]>([]);
+const report = ref<OperationalReport | null>(null);
+const users = ref<UserAccount[]>([]);
+const policy = ref<SecurityPolicy | null>(null);
+
+const selectedModule = computed(() =>
+  modules.value.find((module) => module.slug === activeModuleSlug.value) ?? modules.value[0],
+);
+const activeModuleComponent = computed(() => {
+  const slug = activeModuleSlug.value as keyof typeof moduleComponents;
+  return moduleComponents[slug] ?? moduleComponents[Object.keys(moduleComponents)[0] as keyof typeof moduleComponents];
+});
+
+onMounted(() => {
+  void loadWorkspace();
+});
+
+async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const headers = new Headers(init.headers);
+  if (init.body && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+  const response = await fetch(path, { ...init, headers });
+  if (!response.ok) {
+    throw new Error((await response.text()) || response.statusText);
+  }
+  return response.json() as Promise<T>;
+}
+
+async function login() {
+  const result = await request<{ authenticated: boolean }>('/api/login', {
+    method: 'POST',
+    body: JSON.stringify({ username: username.value, password: password.value }),
+  });
+  authenticated.value = result.authenticated;
+  authMessage.value = result.authenticated ? 'Acceso concedido' : 'Credenciales invalidas';
+  if (authenticated.value) {
+    await loadWorkspace();
+  }
+}
+
+async function loadWorkspace() {
+  loading.value = true;
+  try {
+    const [
+      summaryResult,
+      modulesResult,
+      maintainersResult,
+      reportResult,
+      usersResult,
+      policyResult,
+    ] = await Promise.all([
+      request<BusinessSummary>('/api/business/summary'),
+      request<ApplicationModule[]>('/api/application-modules'),
+      request<MaintainerItem[]>('/api/maintainers'),
+      request<OperationalReport>('/api/reports/operational'),
+      request<UserAccount[]>('/api/security/users'),
+      request<SecurityPolicy>('/api/security/policy'),
+    ]);
+    summary.value = summaryResult;
+    modules.value = modulesResult;
+    maintainers.value = maintainersResult;
+    report.value = reportResult;
+    users.value = usersResult;
+    policy.value = policyResult;
+    if (!activeModuleSlug.value && modules.value.length) {
+      activeModuleSlug.value = modules.value[0].slug;
+    }
+  } finally {
+    loading.value = false;
+  }
+}
+
+function openDashboard() {
+  activeArea.value = 'dashboard';
+}
+
+function openModule(moduleSlug: string) {
+  activeModuleSlug.value = moduleSlug;
+  activeArea.value = 'module';
+}
+
+function openArea(area: Exclude<ActiveArea, 'module'>) {
+  activeArea.value = area;
+}
+
+function downloadReport() {
+  window.open('/api/reports/records.csv', '_blank', 'noopener,noreferrer');
+}
+</script>
+
+<template>
+  <main class="erp-shell">
+    <section v-if="!authenticated" class="login-screen">
+      <article class="login-card">
+        <p class="eyebrow">Panel operativo</p>
+        <h1>${project.name}</h1>
+        <form class="login-form" @submit.prevent="login">
+          <label>Usuario<input v-model="username" autocomplete="username" /></label>
+          <label>Contrasena<input v-model="password" type="password" autocomplete="current-password" /></label>
+          <button type="submit">Ingresar</button>
+        </form>
+        <p class="auth-message">{{ authMessage }}</p>
+      </article>
+    </section>
+
+    <section v-else class="erp-layout">
+      <aside class="sidebar">
+        <header class="brand">
+          <span class="brand-logo">${project.name.slice(0, 2).toUpperCase()}</span>
+          <div>
+            <strong>${project.name}</strong>
+            <small>{{ summary?.domain ?? '${context.primaryEntity}' }}</small>
+          </div>
+        </header>
+
+        <section class="account-box">
+          <span>Cuenta activa</span>
+          <strong>{{ username }}</strong>
+        </section>
+
+        <nav class="nav-menu" aria-label="Menu transaccional">
+          <button type="button" :class="{ active: activeArea === 'dashboard' }" @click="openDashboard">
+            <span>DB</span> Dashboard
+          </button>
+          <p>Modulos principales</p>
+          <button
+            v-for="module in modules"
+            :key="module.slug"
+            type="button"
+            :class="{ active: activeArea === 'module' && activeModuleSlug === module.slug }"
+            @click="openModule(module.slug)"
+          >
+            <span>{{ module.name.slice(0, 2).toUpperCase() }}</span>
+            {{ module.name }}
+          </button>
+          <p>Administracion</p>
+          <button type="button" :class="{ active: activeArea === 'mantenedores' }" @click="openArea('mantenedores')">
+            <span>MT</span> Mantenedores
+          </button>
+          <button type="button" :class="{ active: activeArea === 'reporteria' }" @click="openArea('reporteria')">
+            <span>RP</span> Reporteria
+          </button>
+          <button type="button" :class="{ active: activeArea === 'seguridad' }" @click="openArea('seguridad')">
+            <span>SG</span> Seguridad
+          </button>
+        </nav>
+      </aside>
+
+      <section class="content-shell">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Panel operativo</p>
+            <h1>{{ activeArea === 'module' ? selectedModule?.name : 'Dashboard' }}</h1>
+          </div>
+          <div class="top-actions">
+            <select aria-label="Sucursal activa">
+              <option>Todas mis sucursales</option>
+              <option>Matriz</option>
+              <option>Bodega principal</option>
+            </select>
+            <button type="button" @click="loadWorkspace">{{ loading ? 'Actualizando...' : 'Actualizar' }}</button>
+          </div>
+        </header>
+
+        <section v-if="activeArea === 'dashboard'" class="dashboard-page">
+          <article class="hero-panel">
+            <header>
+              <div>
+                <h2>Panel ejecutivo</h2>
+                <p>{{ summary?.description }}</p>
+              </div>
+              <button type="button" @click="downloadReport">Exportar CSV</button>
+            </header>
+            <section class="kpi-grid">
+              <article><span>Registros</span><strong>{{ summary?.metrics.totalRecords ?? 0 }}</strong><small>Total operativo</small></article>
+              <article><span>Pendientes</span><strong>{{ summary?.metrics.pendingRecords ?? 0 }}</strong><small>Por ejecutar</small></article>
+              <article><span>Bloqueados</span><strong>{{ summary?.metrics.blockedRecords ?? 0 }}</strong><small>Requieren accion</small></article>
+              <article><span>Cumplimiento</span><strong>{{ summary?.metrics.rulesCompliance ?? 100 }}%</strong><small>Reglas activas</small></article>
+            </section>
+          </article>
+
+          <article class="side-panel">
+            <h2>Estado operativo</h2>
+            <dl>
+              <div><dt>Modulos</dt><dd>{{ modules.length }}</dd></div>
+              <div><dt>Usuarios</dt><dd>{{ users.length }}</dd></div>
+              <div><dt>Mantenedores</dt><dd>{{ maintainers.length }}</dd></div>
+              <div><dt>Actualizacion</dt><dd>{{ report?.generatedAt?.slice(0, 19).replace('T', ' ') }}</dd></div>
+            </dl>
+          </article>
+
+          <article class="wide-panel">
+            <h2>Modulos transaccionales</h2>
+            <div class="module-table">
+              <button v-for="module in modules" :key="module.slug" type="button" @click="openModule(module.slug)">
+                <strong>{{ module.name }}</strong>
+                <span>{{ module.description }}</span>
+                <small>{{ module.totalRecords }} registros</small>
+              </button>
+            </div>
+          </article>
+
+          <article class="wide-panel">
+            <h2>Reglas de negocio aplicadas</h2>
+            <ul class="rules-list">
+              <li v-for="rule in summary?.rules" :key="rule.id">{{ rule.description }}</li>
+            </ul>
+          </article>
+        </section>
+
+        <component v-else-if="activeArea === 'module'" :is="activeModuleComponent" />
+
+        <section v-else-if="activeArea === 'mantenedores'" class="admin-grid">
+          <article class="wide-panel">
+            <h2>Mantenedores activos</h2>
+            <table>
+              <thead><tr><th>Tipo</th><th>Etiqueta</th><th>Estado</th></tr></thead>
+              <tbody>
+                <tr v-for="item in maintainers" :key="item.id">
+                  <td>{{ item.type }}</td>
+                  <td>{{ item.label }}</td>
+                  <td>{{ item.active ? 'Activo' : 'Inactivo' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </article>
+        </section>
+
+        <section v-else-if="activeArea === 'reporteria'" class="admin-grid">
+          <article class="wide-panel">
+            <h2>Reporte operacional</h2>
+            <p>Generado: {{ report?.generatedAt }}</p>
+            <ul class="rules-list">
+              <li v-for="recommendation in report?.recommendations" :key="recommendation">{{ recommendation }}</li>
+            </ul>
+            <button type="button" @click="downloadReport">Descargar CSV</button>
+          </article>
+        </section>
+
+        <section v-else class="admin-grid">
+          <article class="wide-panel">
+            <h2>Usuarios y seguridad</h2>
+            <table>
+              <thead><tr><th>Usuario</th><th>Nombre</th><th>Rol</th><th>Estado</th></tr></thead>
+              <tbody>
+                <tr v-for="user in users" :key="user.id">
+                  <td>{{ user.username }}</td>
+                  <td>{{ user.displayName }}</td>
+                  <td>{{ user.role }}</td>
+                  <td>{{ user.active ? 'Activo' : 'Inactivo' }}</td>
+                </tr>
+              </tbody>
+            </table>
+            <p>Politica: minimo {{ policy?.passwordMinLength }} caracteres. Rotacion: {{ policy?.requireRotation ? 'Si' : 'No' }}.</p>
+          </article>
+        </section>
+      </section>
+    </section>
+  </main>
+</template>
+`;
+  }
+
+  private renderTransactionalStyleCss(): string {
+    return `:root {
+  color: #243241;
+  background: #eef3f7;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+.erp-shell {
+  min-height: 100vh;
+}
+
+.login-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.login-card,
+.hero-panel,
+.side-panel,
+.wide-panel,
+.panel {
+  border: 1px solid #d8e0e8;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 18px 38px rgba(31, 45, 61, 0.08);
+}
+
+.login-card {
+  width: min(420px, 100%);
+  padding: 28px;
+}
+
+.login-card h1 {
+  margin: 0 0 18px;
+}
+
+.login-form {
+  display: grid;
+  gap: 14px;
+}
+
+label {
+  display: grid;
+  gap: 6px;
+  color: #34495e;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+input,
+textarea,
+select {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid #c9d5df;
+  border-radius: 6px;
+  padding: 0 11px;
+  background: #ffffff;
+  color: #203040;
+}
+
+textarea {
+  min-height: 96px;
+  padding-top: 10px;
+  resize: vertical;
+}
+
+.login-form button,
+.top-actions button,
+.hero-panel button,
+.wide-panel button,
+.record-form button,
+.module-head button {
+  min-height: 38px;
+  border: 0;
+  border-radius: 6px;
+  padding: 0 14px;
+  background: #1f7664;
+  color: white;
+  font-weight: 900;
+}
+
+.auth-message {
+  min-height: 20px;
+  color: #496173;
+}
+
+.erp-layout {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 248px minmax(0, 1fr);
+}
+
+.sidebar {
+  border-right: 1px solid #d9e1e8;
+  background: #fbfdff;
+  padding: 16px 14px;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 4px 18px;
+}
+
+.brand-logo {
+  width: 36px;
+  height: 36px;
+  display: grid;
+  place-items: center;
+  border: 1px solid #c9ddcf;
+  border-radius: 50%;
+  background: #eff8f0;
+  color: #1f7664;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.brand strong,
+.brand small {
+  display: block;
+}
+
+.brand small,
+.account-box span,
+.eyebrow,
+.hero-panel p,
+.side-panel dt,
+.module-table span,
+.module-table small {
+  color: #647486;
+}
+
+.account-box {
+  display: grid;
+  gap: 4px;
+  margin-bottom: 18px;
+  border: 1px solid #d8e0e8;
+  border-radius: 8px;
+  padding: 12px;
+  background: #f7fafc;
+  font-size: 13px;
+}
+
+.nav-menu {
+  display: grid;
+  gap: 5px;
+}
+
+.nav-menu p {
+  margin: 16px 8px 6px;
+  color: #758596;
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.nav-menu button {
+  min-height: 38px;
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  align-items: center;
+  gap: 9px;
+  border: 0;
+  border-radius: 6px;
+  padding: 0 10px;
+  background: transparent;
+  color: #243241;
+  text-align: left;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.nav-menu button span {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  border-radius: 5px;
+  background: #e8eef4;
+  color: #436072;
+  font-size: 10px;
+}
+
+.nav-menu button.active {
+  background: #e8f4ef;
+  color: #1f7664;
+}
+
+.nav-menu button.active span {
+  background: #1f7664;
+  color: white;
+}
+
+.content-shell {
+  min-width: 0;
+  padding: 0 30px 36px;
+}
+
+.topbar {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  border-bottom: 1px solid #d9e1e8;
+  margin: 0 -30px 30px;
+  padding: 0 30px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.topbar h1,
+.hero-panel h2,
+.side-panel h2,
+.wide-panel h2 {
+  margin: 0;
+}
+
+.eyebrow {
+  margin: 0 0 4px;
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0;
+  text-transform: uppercase;
+}
+
+.top-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.top-actions select {
+  min-width: 260px;
+}
+
+.dashboard-page {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(280px, 0.95fr);
+  gap: 22px;
+}
+
+.hero-panel,
+.side-panel,
+.wide-panel,
+.panel {
+  padding: 20px;
+}
+
+.hero-panel header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.kpi-grid article {
+  min-height: 96px;
+  display: grid;
+  gap: 6px;
+  border-radius: 6px;
+  padding: 14px;
+  background: #eef5fb;
+}
+
+.kpi-grid article:nth-child(2) {
+  background: #e8f5f1;
+}
+
+.kpi-grid article:nth-child(3) {
+  background: #fff0e7;
+}
+
+.kpi-grid article:nth-child(4) {
+  background: #f3ecfb;
+}
+
+.kpi-grid strong {
+  font-size: 28px;
+}
+
+.kpi-grid span,
+.kpi-grid small {
+  color: #637487;
+}
+
+.side-panel dl {
+  display: grid;
+  gap: 14px;
+  margin: 18px 0 0;
+}
+
+.side-panel dl div {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  border-bottom: 1px solid #e3e9ef;
+  padding-bottom: 10px;
+}
+
+.side-panel dd {
+  margin: 0;
+  border-radius: 5px;
+  padding: 4px 8px;
+  background: #e8eef4;
+  font-weight: 900;
+}
+
+.wide-panel {
+  grid-column: 1 / -1;
+}
+
+.module-table {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.module-table button {
+  min-height: 58px;
+  display: grid;
+  grid-template-columns: minmax(160px, 0.5fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  border: 1px solid #d8e0e8;
+  border-radius: 6px;
+  padding: 10px 12px;
+  background: #fbfdff;
+  color: #243241;
+  text-align: left;
+}
+
+.module-table button:hover {
+  border-color: #1f7664;
+  background: #f1faf6;
+}
+
+.rules-list {
+  margin: 14px 0 0;
+  padding-left: 20px;
+  color: #34495e;
+}
+
+.module-page {
+  display: grid;
+  gap: 18px;
+}
+
+.module-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.module-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.module-actions input {
+  min-width: 320px;
+}
+
+.module-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.module-summary article {
+  border: 1px solid #d8e0e8;
+  border-radius: 8px;
+  padding: 16px;
+  background: #ffffff;
+}
+
+.module-summary span,
+.record-card span,
+.module-error {
+  color: #647486;
+}
+
+.module-summary strong {
+  display: block;
+  margin-top: 6px;
+  font-size: 28px;
+}
+
+.module-grid,
+.admin-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+  gap: 16px;
+}
+
+.record-form {
+  display: grid;
+  gap: 12px;
+}
+
+.records {
+  display: grid;
+  gap: 8px;
+}
+
+.record-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 90px 160px 100px;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #d8e0e8;
+  border-radius: 7px;
+  padding: 12px;
+  background: #ffffff;
+}
+
+.record-card div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.record-card small {
+  border-radius: 999px;
+  padding: 5px 8px;
+  background: #e9f0ff;
+  color: #2f64d6;
+  text-align: center;
+  font-weight: 900;
+}
+
+.record-card small.alta {
+  background: #fde8e4;
+  color: #b42318;
+}
+
+.record-card small.critica {
+  background: #2b1620;
+  color: #ffffff;
+}
+
+.record-card small.baja {
+  background: #e4f4ea;
+  color: #237a48;
+}
+
+.record-card button {
+  min-height: 34px;
+  border: 1px solid #e2b8b2;
+  border-radius: 6px;
+  background: #fff5f3;
+  color: #a13b2f;
+  font-weight: 900;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 14px;
+}
+
+th,
+td {
+  border-bottom: 1px solid #e3e9ef;
+  padding: 10px;
+  text-align: left;
+}
+
+td span {
+  display: block;
+  margin-top: 3px;
+  color: #647486;
+}
+
+th {
+  color: #607184;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+@media (max-width: 960px) {
+  .erp-layout,
+  .dashboard-page,
+  .module-grid,
+  .admin-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    position: static;
+  }
+
+  .content-shell {
+    padding: 0 16px 24px;
+  }
+
+  .topbar {
+    margin: 0 -16px 20px;
+    padding: 14px 16px;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .top-actions,
+  .hero-panel header,
+  .module-actions,
+  .record-card,
+  .module-table button {
+    grid-template-columns: 1fr;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .module-actions input {
+    min-width: 0;
+  }
+
+  .kpi-grid,
+  .module-summary {
+    grid-template-columns: 1fr;
+  }
+}
+`;
+  }
+
   private buildBusinessContext(
     project: ProjectRecord,
     prompt: string,
@@ -3006,6 +4175,8 @@ ${targetType === 'executable' ? 'Aplicacion Java Spring Boot empaquetable como J
 
 - CRUD completo para ${context.primaryEntity}: crear, consultar, actualizar, cambiar estado, eliminar, filtrar y exportar CSV.
 - CRUD independiente para cada modulo solicitado por el usuario mediante /api/application-modules.
+- Shell frontend transaccional: sidebar/menu por modulo, dashboard ejecutivo, vista propia por modulo, tabla, buscador, formulario y acciones de estado/eliminacion.
+- Prohibido entregar solo cards, contadores, listas genericas o documentacion como interfaz final.
 - Validacion de reglas de negocio sobre cada registro.
 - Reporteria operacional con metricas por estado, prioridad y cumplimiento.
 - Mantenedores para catalogos de operacion: estados, prioridades, categorias y roles.
@@ -3118,6 +4289,11 @@ erDiagram
       .filter(Boolean)
       .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
       .join(' ');
+  }
+
+  private toCamelCase(value: string): string {
+    const className = this.toClassName(value);
+    return `${className.charAt(0).toLowerCase()}${className.slice(1)}`;
   }
 
   private slugify(value: string): string {

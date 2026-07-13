@@ -580,15 +580,44 @@ function setProjectLogs(projectId: string, agentKey: AgentKey, logs: string[]) {
   }
 }
 
-function downloadReport() {
+async function downloadReport() {
   if (!selectedProject.value) {
     return
   }
-  window.open(
-    `${API_BASE}/projects/${selectedProject.value.id}/agents/${activeAgent.value}/report/download`,
-    '_blank',
-    'noopener,noreferrer',
-  )
+  try {
+    const response = await fetch(
+      `${API_BASE}/projects/${selectedProject.value.id}/agents/${activeAgent.value}/report/download`,
+    )
+    if (!response.ok) {
+      throw new Error(response.statusText || 'No se pudo descargar el reporte.')
+    }
+
+    const blob = await response.blob()
+    const url = window.URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download =
+      getFileNameFromDisposition(response.headers.get('Content-Disposition')) ??
+      `${selectedProject.value.slug}-${activeAgent.value}-report.pdf`
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+    window.URL.revokeObjectURL(url)
+  } catch (error) {
+    errorMessage.value = getErrorMessage(error)
+  }
+}
+
+function getFileNameFromDisposition(disposition: string | null) {
+  if (!disposition) {
+    return undefined
+  }
+  const encoded = disposition.match(/filename\*=UTF-8''([^;]+)/i)
+  if (encoded?.[1]) {
+    return decodeURIComponent(encoded[1])
+  }
+  const plain = disposition.match(/filename="?([^";]+)"?/i)
+  return plain?.[1]
 }
 
 function startLiveLogs(projectId: string, agentKey: AgentKey, projectName: string) {
@@ -706,7 +735,7 @@ function renderMarkdown(markdown: string) {
 
     if (trimmed.startsWith('```')) {
       if (inCode) {
-        html.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`)
+        html.push(renderCodeBlock(codeLines.join('\n')))
         codeLines = []
         inCode = false
       } else {
@@ -761,9 +790,38 @@ function renderMarkdown(markdown: string) {
 
   closeList()
   if (inCode) {
-    html.push(`<pre><code>${escapeHtml(codeLines.join('\n'))}</code></pre>`)
+    html.push(renderCodeBlock(codeLines.join('\n')))
   }
   return html.join('')
+}
+
+function renderCodeBlock(value: string) {
+  return `<div class="code-block"><button class="copy-code" type="button" data-copy="${escapeHtml(
+    encodeURIComponent(value),
+  )}">Copiar</button><pre><code>${escapeHtml(value)}</code></pre></div>`
+}
+
+async function handleMarkdownClick(event: MouseEvent) {
+  const target = event.target instanceof Element ? event.target : undefined
+  const button = target?.closest<HTMLButtonElement>('[data-copy]')
+  if (!button) {
+    return
+  }
+
+  const text = decodeURIComponent(button.dataset.copy ?? '')
+  try {
+    await navigator.clipboard.writeText(text)
+    const previous = button.textContent || 'Copiar'
+    button.textContent = 'Copiado'
+    window.setTimeout(() => {
+      button.textContent = previous
+    }, 1200)
+  } catch {
+    button.textContent = 'Error'
+    window.setTimeout(() => {
+      button.textContent = 'Copiar'
+    }, 1200)
+  }
 }
 
 function renderInline(value: string) {
@@ -1103,7 +1161,7 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
             </div>
           </div>
 
-          <div class="markdown-view" v-html="renderedOutput"></div>
+          <div class="markdown-view" v-html="renderedOutput" @click="handleMarkdownClick"></div>
         </article>
       </section>
     </section>

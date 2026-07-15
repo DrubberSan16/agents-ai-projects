@@ -78,7 +78,8 @@ export interface DeploymentInfo {
   createdAt: string;
 }
 
-export interface ProjectSnapshot extends ProjectRecord {
+export interface ProjectSnapshot
+  extends Omit<ProjectRecord, 'projectPath' | 'sqlitePath' | 'rulesPath'> {
   agents: AgentState[];
   notifications: ProjectNotification[];
   latestTicket?: DevelopmentTicket;

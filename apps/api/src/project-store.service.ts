@@ -5,8 +5,15 @@ import {
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import {
   AGENT_KEYS,
@@ -26,7 +33,6 @@ import {
 export class ProjectStoreService {
   private readonly storageRoot: string;
   private readonly projectMetaRoot: string;
-  private readonly generatedProjectsRoot: string;
   private readonly indexPath: string;
 
   constructor(private readonly configService: ConfigService) {
@@ -35,46 +41,60 @@ export class ProjectStoreService {
     );
     this.storageRoot = resolve(configuredStorage ?? join(process.cwd(), 'storage'));
     this.projectMetaRoot = join(this.storageRoot, 'projects');
-    this.generatedProjectsRoot = join(this.storageRoot, 'generated-projects');
     this.indexPath = join(this.storageRoot, 'projects.index.json');
     this.ensureDirectory(this.projectMetaRoot);
-    this.ensureDirectory(this.generatedProjectsRoot);
     if (!existsSync(this.indexPath)) {
       writeFileSync(this.indexPath, '[]\n', 'utf8');
     }
   }
 
   createProject(input: CreateProjectInput): ProjectSnapshot {
-    const name = input.name?.trim();
+    const mode = input.mode ?? 'new';
+    const sourcePath = input.path?.trim() ? resolve(input.path.trim()) : undefined;
+    const name =
+      mode === 'existing' && sourcePath
+        ? basename(sourcePath)
+        : input.name?.trim();
     if (!name) {
       throw new BadRequestException('El proyecto necesita un nombre.');
     }
 
-    const mode = input.mode ?? 'new';
+    if (
+      mode === 'existing' &&
+      (!sourcePath || !existsSync(sourcePath) || !statSync(sourcePath).isDirectory())
+    ) {
+      throw new BadRequestException(
+        sourcePath
+          ? 'La ruta seleccionada no existe o no es una carpeta.'
+          : 'Selecciona la ruta donde esta alojado el proyecto.',
+      );
+    }
+
     const targetType = input.targetType ?? 'unknown';
     const slug = this.uniqueSlug(name);
     const id = this.createId('project');
     const metaDir = join(this.projectMetaRoot, id);
     const now = new Date().toISOString();
-    const projectPath =
+    const serverRoot =
       mode === 'new'
-        ? resolve(input.path?.trim() || this.generatedProjectsRoot, slug)
-        : resolve(input.path?.trim() || '');
+        ? this.configService.get<string>('NEW_PROJECTS_ROOT') ?? '/opt/projects-ai'
+        : this.configService.get<string>('EXISTING_PROJECTS_ROOT') ??
+          '/opt/projects-ai-mejora';
+    const timestampDir = this.createTimestampDirectory(resolve(serverRoot));
+    const folderName =
+      mode === 'new' ? this.serverFolderName(name) : basename(sourcePath ?? '');
+    const projectPath = join(timestampDir, folderName);
 
     if (mode === 'existing') {
-      if (!input.path?.trim()) {
-        throw new BadRequestException(
-          'Selecciona la ruta donde esta alojado el proyecto.',
-        );
-      }
-      if (!existsSync(projectPath) || !statSync(projectPath).isDirectory()) {
-        throw new BadRequestException(
-          'La ruta seleccionada no existe o no es una carpeta.',
-        );
-      }
+      cpSync(sourcePath!, projectPath, {
+        recursive: true,
+        errorOnExist: true,
+        force: false,
+      });
+    } else {
+      this.ensureDirectory(projectPath);
     }
 
-    this.ensureDirectory(projectPath);
     this.ensureDirectory(metaDir);
     const agentDir = this.ensureAgentDirectory(projectPath);
     const rulesPath = join(agentDir, 'business-rules.md');
@@ -554,8 +574,9 @@ export class ProjectStoreService {
     const latestDeployment = this.getLatestDeployment(project);
     const hasTestingReport = Boolean(this.getLatestTestingReportPath(project));
     const documentCount = this.getDocumentCount(project);
+    const { projectPath, sqlitePath, rulesPath, ...publicProject } = project;
     return {
-      ...project,
+      ...publicProject,
       agents,
       notifications,
       latestTicket,
@@ -770,6 +791,29 @@ export class ProjectStoreService {
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/(^-|-$)/g, '');
     return slug || `project-${Date.now()}`;
+  }
+
+  private serverFolderName(value: string): string {
+    const normalized = value
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/ñ/gi, 'n')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+    return normalized || `project_${Date.now()}`;
+  }
+
+  private createTimestampDirectory(root: string): string {
+    this.ensureDirectory(root);
+    let timestamp = Date.now();
+    let timestampDir = join(root, String(timestamp));
+    while (existsSync(timestampDir)) {
+      timestamp += 1;
+      timestampDir = join(root, String(timestamp));
+    }
+    this.ensureDirectory(timestampDir);
+    return timestampDir;
   }
 
   private safeFileName(value: string): string {

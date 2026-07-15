@@ -5,9 +5,7 @@ import {
   Check,
   ChevronLeft,
   Code2,
-  Database,
   Download,
-  FileText,
   FolderOpen,
   HardDrive,
   Loader2,
@@ -72,9 +70,6 @@ interface ProjectSnapshot {
   slug: string
   mode: ProjectMode
   targetType: ProjectTarget
-  projectPath: string
-  sqlitePath: string
-  rulesPath: string
   agents: AgentState[]
   notifications: ProjectNotification[]
   latestTicket?: DevelopmentTicket
@@ -267,10 +262,6 @@ const outputText = computed(() => {
 
 const renderedOutput = computed(() => renderMarkdown(outputText.value))
 
-const pathLabel = computed(() =>
-  createForm.mode === 'new' ? 'Carpeta base' : 'Carpeta del proyecto',
-)
-
 onMounted(() => {
   void loadProjects()
 })
@@ -307,11 +298,8 @@ async function createProject() {
     errorMessage.value = 'Asigna un nombre al proyecto.'
     return
   }
-  if (!createForm.path.trim()) {
-    errorMessage.value =
-      createForm.mode === 'new'
-        ? 'Selecciona la carpeta base donde se creara el proyecto.'
-        : 'Selecciona la carpeta donde esta el proyecto existente.'
+  if (createForm.mode === 'existing' && !createForm.path.trim()) {
+    errorMessage.value = 'Selecciona la carpeta donde esta el proyecto existente.'
     return
   }
 
@@ -323,7 +311,7 @@ async function createProject() {
       body: JSON.stringify({
         name,
         mode: createForm.mode,
-        path: createForm.path.trim(),
+        path: createForm.mode === 'existing' ? createForm.path.trim() : undefined,
         targetType: 'unknown',
         businessRules:
           createForm.mode === 'new' ? createForm.businessRules.trim() || undefined : undefined,
@@ -690,8 +678,11 @@ function statusClass(status: AgentStatus) {
   return map[status]
 }
 
-function projectModeLabel(mode: ProjectMode) {
-  return mode === 'new' ? 'Nuevo' : 'Existente'
+function formatDate(value: string) {
+  return new Intl.DateTimeFormat('es-EC', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(new Date(value))
 }
 
 function inferNameFromPath(path: string) {
@@ -915,13 +906,13 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
           </button>
         </div>
 
-        <label>
+        <label v-if="createForm.mode === 'new'">
           Nombre
           <input v-model="createForm.name" placeholder="Proyecto CRM" />
         </label>
 
-        <label>
-          {{ pathLabel }}
+        <label v-if="createForm.mode === 'existing'">
+          Carpeta del proyecto
           <span class="path-picker">
             <input
               v-model="createForm.path"
@@ -963,7 +954,7 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
           @click="selectedProjectId = project.id"
         >
           <strong>{{ project.name }}</strong>
-          <span>{{ projectModeLabel(project.mode) }} · {{ project.documentCount }} docs</span>
+          <span>{{ formatDate(project.createdAt) }}</span>
         </button>
       </div>
     </aside>
@@ -975,9 +966,7 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
           <h1>{{ selectedProject?.name ?? 'Selecciona un proyecto' }}</h1>
         </div>
         <div v-if="selectedProject" class="header-meta">
-          <span>{{ projectModeLabel(selectedProject.mode) }}</span>
-          <span>{{ selectedProject.documentCount }} docs</span>
-          <span>{{ selectedProject.projectPath }}</span>
+          <span>{{ formatDate(selectedProject.createdAt) }}</span>
         </div>
       </header>
 
@@ -1072,17 +1061,6 @@ async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
             </div>
             <span class="status-pill" :class="statusClass(displayStatus(activeAgent))">
               {{ displayStatus(activeAgent) }}
-            </span>
-          </div>
-
-          <div class="path-grid">
-            <span>
-              <FileText :size="15" />
-              {{ selectedProject.rulesPath }}
-            </span>
-            <span>
-              <Database :size="15" />
-              {{ selectedProject.sqlitePath }}
             </span>
           </div>
 
